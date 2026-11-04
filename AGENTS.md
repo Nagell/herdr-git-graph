@@ -53,7 +53,7 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
 - **Branch Selection Filter & Ref Context Menu**:
   - Toolbar dropdown allows selecting "All branches" (`--all`), "Current branch" (`HEAD`), or any specific local/remote branch (`git log <branch>`).
   - Clicking any branch badge in the commit table instantly filters the DAG to that branch's reachable history.
-  - Right-clicking any branch badge opens a dedicated ref context menu: **Checkout Branch**, **Delete Branch...** (with safe/force delete confirmation), and **Copy Branch Name**.
+  - Right-clicking any branch badge (or a branch in the toolbar dropdown) opens a dedicated ref context menu: **Checkout Branch**, **Merge into Current Branch…** (disabled for the checked-out branch, confirmed before `git merge --no-edit`), **Delete Branch...** (with safe/force delete confirmation), and **Copy Branch Name**.
 - **One-Click Fetch / Pull / Push**:
   - Three icon buttons sit next to the branch selector: **Fetch** (`git fetch --all --prune`), **Pull** (`git pull --no-edit`), and **Push** (sets the upstream automatically when the branch has none).
   - With no remote configured, **Push** turns into **Publish to GitHub**: after `gh auth status` confirms a login, a modal asks for the repository name (prefilled from the folder name, sanitized) and Private / Public visibility, then runs `gh repo create <name> --source <root> --remote origin --private|--public` followed by `git push --set-upstream origin <branch>`.
@@ -61,15 +61,20 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - The selector shows ahead/behind counts (`↑n` / `↓n`) and the dropdown shows the tracked upstream. Tooltips state the exact command and target.
   - Fetch disables without a remote; Pull needs an upstream, Push needs a commit and a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.
   - Remote commands run with `credential.interactive=false` and an HTTP low-speed cutoff so a missing prompt or stalled transfer fails loudly instead of hanging the toolbar.
-- **Background Tree Cleanup Agent**:
-  - An OpenCode icon button beside the branch controls (and a matching action in the branch dropdown when the tree is dirty) starts **OpenCode Mini** in a background Herdr terminal with `hc run --bg --keep`.
-  - It runs the `build` agent with `opencode-go/deepseek-v4.1-flash#low` and names the terminal `clean-<branch>` (labels it to the current space/tab).
+- **Background AI Commit Worker**:
+  - A sparkles AI button beside the branch controls (and a matching action in the branch dropdown when the tree is dirty) starts **OpenCode Mini** in a background Herdr terminal with `hc run --bg --keep`.
+  - It runs the `build` agent and always prefers free models: `opencode models` is consulted at launch and the first available entry from a curated free list (DeepSeek V4.1 Flash Free `#low`, GLM-5.3-Flash Free, MiMo-V2.6-Flash Free, …) is used. A saved choice in `shared("git-graph.cleanAgentModel")` wins only while it is still listed.
+  - Right-clicking the toolbar button, or **AI commit model…** in the branch dropdown, opens a scrollable model picker with provider tabs (each provider's icon), a search field, free models first and a **Show all** toggle. If no free model is available, or the worker exits before the tree is clean, the picker opens automatically so the person can choose another model and retry.
+  - It names the terminal `clean-<branch>` (labels it to the current space/tab).
   - The first message carries the repository, current branch, dirty paths, and any in-progress merge/rebase/cherry-pick/revert. The agent must resolve conflicts and complete the operation, then make atomic Conventional Commits on the current branch using the `git-change-workflow` skill.
   - The task explicitly forbids pushing, fetching, force-pushing, history rewriting, `reset --hard`, and `git clean`. The button disables on a clean tree, detached HEAD, while another git action runs, or while the launched agent is still working; the success toast can peek at its terminal.
+  - Once the session goes idle **and** `git status` is clean, the worker is done: the graph reports how many commits were created, kills the background terminal, and closes its tab/pane. A dirty tree with a dead terminal instead shows an error and opens the model picker.
 - **Working Tree Inspection**:
   - Inspects uncommitted changes via `git status --porcelain=v1 -z --no-renames --untracked-files=all` and diff stats.
   - Displays a top "WIP" row with `+add` / `−del` badges connected directly to HEAD in lane 0.
   - Inspects modified, added, deleted, and untracked files; each diff opens in its own tab.
+  - Right-clicking the WIP row opens a context menu: **Stash All Changes…** (optional message, include-untracked toggle), **Stash Staged Changes…**, and **Unstash Latest…** when a stash exists.
+  - `git stash list` is loaded on every refresh. The branch dropdown lists every stash, so an unstash stays reachable after the dirty row disappears; choosing one runs `git stash pop --index` after confirmation.
 - **Docked Panel Mode**:
   - `props: { panel: true }` renders the graph as the Files-style card inside a layout panel, such as Herdr's Changes slot.
   - The toolbar stays compact: the brand text is dropped, the branch selector flexes into the free width, and an expand button opens the same repository full size in a tab.

@@ -28,7 +28,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
 - **Branch Selection Filter & Ref Context Menu**:
   - Toolbar dropdown selector supporting **All branches** (`--all`), **Current branch** (`HEAD`), and any explicit local or remote branch.
   - Clicking any branch badge directly in the commit table instantly isolates reachability to that branch.
-  - Right-clicking any branch badge opens a dedicated context menu: **Checkout Branch**, **Delete Branch...** (with safe/force delete confirmation), and **Copy Branch Name**.
+  - Right-clicking any branch badge (or a branch in the toolbar dropdown) opens a dedicated context menu: **Checkout Branch**, **Merge into Current Branch...** (disabled for the checked-out branch, confirmed before `git merge --no-edit`), **Delete Branch...** (with safe/force delete confirmation), and **Copy Branch Name**.
 - **One-Click Remote Sync**:
   - Toolbar **Fetch**, **Pull**, and **Push** buttons beside the branch selector, each with a tooltip naming the exact command and target upstream.
   - The branch selector shows ahead/behind counts (`↑n` / `↓n`); the dropdown reports the tracked upstream.
@@ -36,11 +36,13 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - With no remote configured, **Push** publishes the repository to GitHub: it checks `gh auth status`, then asks for a repository name (prefilled from the folder name) and Private / Public visibility before creating the repo and pushing.
   - A missing or unauthenticated GitHub CLI reports what to install or run instead of disabling Push.
   - Fetch disables without a remote; Pull needs an upstream, Push needs a commit on a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.
-- **Background Tree Cleanup Agent**:
-  - A one-click OpenCode button beside the branch controls (also available from the branch dropdown when dirty) starts **OpenCode Mini** in a background Herdr terminal.
-  - It uses the low-reasoning `opencode-go/deepseek-v4.1-flash#low` variant and receives the current branch, dirty paths, and any in-progress operation in its first message.
+- **Background AI Commit Worker**:
+  - A one-click sparkles AI button beside the branch controls (also available from the branch dropdown when dirty) starts **OpenCode Mini** in a background Herdr terminal.
+  - It always picks the best available free model — DeepSeek V4.1 Flash Free by default, then other free `opencode models` entries — and receives the current branch, dirty paths, and any in-progress operation in its first message.
+  - Right-click the AI button (or use **AI commit model…** in the branch dropdown) to choose a model from a scrollable, searchable picker with provider tabs. If no free model can start or the worker stops before finishing, the picker opens automatically.
   - The agent resolves merge/rebase/cherry-pick/revert conflicts, completes the operation, and turns the remaining changes into atomic Conventional Commits using the `git-change-workflow` skill.
   - It works on the current branch only and is explicitly told never to push, fetch, force-push, rewrite history, or discard work. The button disables when the tree is clean, HEAD is detached, or the launched agent is still running; the toast opens its terminal.
+  - When the commits land and the tree is clean, the worker tab closes itself and the toast reports how many commits were created.
 - **Stash Rows**:
   - Every `git stash` entry renders above the working tree as its own row: hollow stash node, `stash@{n}` pill, reflog subject, relative date, author, and stash commit.
   - Clicking a stash shows its changed files in the details tree and opens normal diff tabs. Right-click for **Unstash (Pop)**, **Apply Stash (Keep)**, **Drop Stash**, and copy actions.
@@ -49,6 +51,8 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Real-time detection of dirty working trees via `git status` and diff statistics.
   - Dedicated top "WIP" row displaying uncommitted changes with `+add` / `−del` counters.
   - Full inspection of modified, added, deleted, and untracked files, each diff opening in its own tab.
+  - Right-click the WIP row to **Stash All Changes…** (with an optional message and include-untracked toggle), **Stash Staged Changes…**, or **Unstash Latest…**.
+  - The branch dropdown lists existing stashes even when the tree is clean, and restoring one opens a confirmation and runs `git stash pop --index`.
 - **VS Code-Style Changed Files Tree**:
   - A fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder.
   - Nested folders with indentation guide lines and chevrons; no folder icons, matching VS Code's Source Control view.
@@ -161,7 +165,7 @@ updates the Changes panel immediately. A pinned space still keeps its pinned
 folder regardless of where its terminals `cd`.
 
 ### Test Preview Props
-For headless testing or automated surface inspection, open specific overlays on first load using the `preview` prop (`"context-menu"`, `"dropdown"`, `"modal-branch"`, `"modal-tag"`, `"modal-reset"`, `"confirm-merge"`, `"file-diff"`):
+For headless testing or automated surface inspection, open specific overlays on first load using the `preview` prop (`"context-menu"`, `"branch-context-menu"`, `"dropdown"`, `"modal-branch"`, `"modal-tag"`, `"modal-reset"`, `"confirm-merge"`, `"modal-merge-branch"`, `"file-diff"`):
 ```sh
 herdr-app do tab.new --mod git-graph --props '{"folder":"/tmp/repo","preview":"modal-branch"}'
 ```
