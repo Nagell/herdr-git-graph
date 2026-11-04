@@ -48,6 +48,7 @@ import {
   highlightRows,
   buildDiffView,
   lineSegments,
+  computeEffectiveRoot,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -315,13 +316,13 @@ function resolveLocation(manualRoot, currentRoot) {
   // 3. The space itself.
   if (space?.folder) return { cwd: space.folder, on };
 
-  // 4. A root already resolved for this view.
-  if (currentRoot) return { cwd: currentRoot, on };
-
-  // 5. Last resort: any terminal in the space.
+  // 4. Any terminal in the space.
   const tabIds = new Set((space?.tabs ?? []).map((t) => t.id));
   const activeSpacePane = panes().find((p) => tabIds.has(p.tab) && p.cwd && !p.mod);
   if (activeSpacePane?.cwd) return { cwd: activeSpacePane.cwd, on };
+
+  // 5. Last resort: a root already resolved for this view.
+  if (currentRoot) return { cwd: currentRoot, on };
 
   return { cwd: null, on };
 }
@@ -497,7 +498,9 @@ export default class GitGraph extends View {
     // Switching spaces does not re-render the panel by itself: watch the
     // resolved location (in memory only, no git) so the graph follows the
     // selected space at once instead of waiting for the next full refresh.
-    cx.timer.every(250, (cx) => { if (this.getKey() !== this.context) cx.notify(); });
+    cx.timer.every(100, (cx) => {
+      if (this.getKey() !== this.context) this.refresh(cx);
+    });
   }
 
   /**
@@ -1157,10 +1160,7 @@ export default class GitGraph extends View {
 
   getKey() {
     const loc = this.getLocation();
-    let effectiveRoot = this.root || loc.cwd;
-    if (this.root && loc.cwd && (loc.cwd === this.root || loc.cwd.startsWith(this.root + "/"))) {
-      effectiveRoot = this.root;
-    }
+    const effectiveRoot = computeEffectiveRoot(this.root, loc.cwd);
     return JSON.stringify({ root: effectiveRoot, on: loc.on });
   }
 
@@ -1332,6 +1332,7 @@ export default class GitGraph extends View {
         const root = top.stdout.trim();
         if (this.root && root !== this.root) {
           // Switched to a DIFFERENT repository!
+          this.root = root;
           this.commits = [];
           this.filteredCommits = [];
           this.workingTreeFiles = [];
@@ -1351,6 +1352,7 @@ export default class GitGraph extends View {
           this.stashes = [];
           this.stashNodes = [];
           this.stagedCount = 0;
+          cx.notify();
         }
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
 
@@ -1649,7 +1651,7 @@ export default class GitGraph extends View {
 
         this.watch(root, cx);
       } catch (err) {
-        if (this.getKey() === context) {
+        if (this.getKey() === context || this.context === context) {
           this.error = err instanceof Error ? err.message : String(err);
         }
       } finally {

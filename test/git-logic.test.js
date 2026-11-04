@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  computeEffectiveRoot,
   parseRefs,
   logArgs,
   tagArgs,
@@ -10,6 +11,45 @@ import {
   diffRows,
   lineSegments,
 } from "../mods/git-graph/git-logic.js";
+
+test("computeEffectiveRoot: handles repo switching, subdirectories, and empty locations", () => {
+  // Same repo root
+  assert.equal(
+    computeEffectiveRoot("/path/to/repoA", "/path/to/repoA"),
+    "/path/to/repoA"
+  );
+
+  // Subdirectory inside current repo preserves current root
+  assert.equal(
+    computeEffectiveRoot("/path/to/repoA", "/path/to/repoA/mods/git-graph"),
+    "/path/to/repoA"
+  );
+
+  // Different repository/folder returns candidate cwd so key changes immediately
+  assert.equal(
+    computeEffectiveRoot("/path/to/repoA", "/path/to/repoB"),
+    "/path/to/repoB"
+  );
+  assert.equal(
+    computeEffectiveRoot("/path/to/repoA", "/path/to/repoA-other"),
+    "/path/to/repoA-other"
+  );
+
+  // Initial load without current root
+  assert.equal(
+    computeEffectiveRoot(null, "/path/to/repoA"),
+    "/path/to/repoA"
+  );
+  assert.equal(
+    computeEffectiveRoot(undefined, "/path/to/repoA"),
+    "/path/to/repoA"
+  );
+
+  // Missing or empty cwd returns null
+  assert.equal(computeEffectiveRoot("/path/to/repoA", null), null);
+  assert.equal(computeEffectiveRoot("/path/to/repoA", ""), null);
+  assert.equal(computeEffectiveRoot(null, null), null);
+});
 
 test("parseRefs: parses decorated refs correctly", () => {
   // HEAD -> refs/heads/feat/x

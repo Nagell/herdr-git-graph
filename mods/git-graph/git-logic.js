@@ -1,6 +1,24 @@
 // Pure logic functions for Git Graph: ref parsing, topological DAG lane calculation,
 // file tree construction, and diff line formatting.
 
+/**
+ * Resolves the effective repository root given the currently loaded root and a candidate cwd.
+ * If cwd is inside currentRoot, currentRoot is preserved so subdirectories don't trigger
+ * an unnecessary repository reload. Otherwise, cwd is returned so switching spaces or
+ * repositories changes the location key immediately.
+ *
+ * @param {string | null | undefined} currentRoot
+ * @param {string | null | undefined} cwd
+ * @returns {string | null}
+ */
+export function computeEffectiveRoot(currentRoot, cwd) {
+  if (!cwd) return null;
+  if (currentRoot && (cwd === currentRoot || cwd.startsWith(currentRoot + "/"))) {
+    return currentRoot;
+  }
+  return cwd;
+}
+
 export function countLines(text) {
   return text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 }
