@@ -413,6 +413,7 @@ export default class GitGraph extends View {
     this.root = this.diffMode && typeof p.folder === "string" && p.folder ? p.folder : null;
     this.context = null;
     this.watched = null;
+    this.watchToken = null;
 
     this.searchQuery = "";
     this.searchOpen = false;
@@ -499,8 +500,14 @@ export default class GitGraph extends View {
     cx.timer.every(250, (cx) => { if (this.getKey() !== this.context) cx.notify(); });
   }
 
+  /**
+   * Releases watchers and resources on tab close.
+   *
+   * @param {import("./gpui-kit.js").Context} _cx
+   */
   async close(_cx) {
     this.watched = null;
+    this.watchToken = null;
   }
 
   /** Reads the one diff this tab was opened for, as a unified diff string. */
@@ -1157,17 +1164,28 @@ export default class GitGraph extends View {
     return JSON.stringify({ root: effectiveRoot, on: loc.on });
   }
 
+  /**
+   * Watches the repository root folder for filesystem changes and triggers refresh.
+   * Uses a per-loop token to prevent orphaned loops from piling up across repo switches.
+   *
+   * @param {string} root
+   * @param {import("./gpui-kit.js").Context} cx
+   */
   watch(root, cx) {
     if (this.on || this.watched === root) return;
     this.watched = root;
+    const token = (this.watchToken = {});
     cx.spawn(async (cx) => {
       try {
-        while (this.watched === root) {
+        while (this.watchToken === token && this.watched === root) {
           await watchFolder(root);
-          if (this.watched === root) this.refresh(cx);
+          if (this.watchToken === token && this.watched === root) this.refresh(cx);
         }
       } catch {
-        this.watched = null;
+        if (this.watchToken === token) {
+          this.watched = null;
+          this.watchToken = null;
+        }
       }
     });
   }
@@ -1322,6 +1340,7 @@ export default class GitGraph extends View {
           this.commitFiles = [];
           this.selectedFile = null;
           this.watched = null;
+          this.watchToken = null;
           this.contextMenu = null;
           this.modalDialog = null;
           this.upstream = null;
@@ -4387,10 +4406,22 @@ export default class GitGraph extends View {
    * OpenCode Mini never reports OSC 7501 status, so poll its session. The
    * session is idle once `time.idle` is at or after `time.busy`. When it
    * settles, `checkTreeAgentFinished` decides whether the worker is done.
+   *
+   * Polls the background AI commit agent session for status changes.
+   * Abandons hung requests after 30 s and ignores superseded poll generations.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
    */
   pollTreeAgent(cx) {
     const agent = this.treeAgent;
-    if (!agent?.sessionId || agent.polling || agent.finished) return;
+    if (!agent?.sessionId || agent.finished) return;
+    if (agent.polling) {
+      if (agent.pollStartedAt && Date.now() - agent.pollStartedAt > 30000) {
+        agent.polling = false;
+      } else {
+        return;
+      }
+    }
     const term = terminals().find((t) => t.address === agent.address);
     // A missing address means `hc run`'s JSON was unusable; follow the session
     // instead of treating the worker as already gone.
@@ -4407,12 +4438,15 @@ export default class GitGraph extends View {
     }
 
     agent.polling = true;
+    agent.pollStartedAt = Date.now();
+    const pollGen = (agent.pollGen = (agent.pollGen || 0) + 1);
     cx.spawn(async (cx) => {
       try {
         const r = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}`], {
           cwd: agent.root,
           on: agent.on,
         });
+        if (this.treeAgent !== agent || agent.pollGen !== pollGen) return;
         if (r.code !== 0) return;
         const payload = JSON.parse(r.stdout);
         const session = payload?.data ?? payload;
@@ -4420,7 +4454,7 @@ export default class GitGraph extends View {
         const started = time.busy || time.created;
         const failed = session?.outcome === "failed" || session?.outcome === "error";
         const busy = !failed && Boolean(started) && (!time.idle || time.idle < started);
-        if (this.treeAgent !== agent) return;
+        if (this.treeAgent !== agent || agent.pollGen !== pollGen) return;
         agent.found = true;
         if (failed) {
           agent.failed = true;
@@ -4438,7 +4472,9 @@ export default class GitGraph extends View {
       } catch {
         // The API may not be available; the terminal-status fallback applies.
       } finally {
-        agent.polling = false;
+        if (agent.pollGen === pollGen) {
+          agent.polling = false;
+        }
       }
     });
   }
