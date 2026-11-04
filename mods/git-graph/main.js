@@ -1478,8 +1478,23 @@ export default class GitGraph extends View {
         } else if ((preview === "context-menu" || p?.openContextMenu) && this.commits.length > 0) {
           this.contextMenu = { type: "commit", commit: this.commits[0], x: 180, y: 100 };
         } else if ((preview === "branch-context-menu" || p?.openBranchContextMenu) && this.commits.length > 0) {
-          const branchName = this.currentBranch || this.availableBranches[0] || "my-test-branch";
-          this.contextMenu = { type: "branch", ref: { kind: "branch", text: branchName }, x: 180, y: 70 };
+          const branchName =
+            this.availableBranches.find((b) => b !== this.currentBranch) ||
+            this.currentBranch ||
+            this.availableBranches[0] ||
+            "my-test-branch";
+          this.contextMenu = {
+            type: "branch",
+            ref: { kind: this.branchRefKind(branchName), text: branchName },
+            x: 180,
+            y: 70,
+          };
+        } else if (preview === "modal-merge-branch" && this.commits.length > 0) {
+          const branchName =
+            this.availableBranches.find((b) => b !== this.currentBranch) ||
+            this.currentBranch ||
+            "my-test-branch";
+          this.openModal("confirm-merge-branch", { ref: { kind: this.branchRefKind(branchName), text: branchName } }, cx);
         } else if (preview === "modal-branch" && this.commits.length > 0) {
           this.openModal("branch", this.commits[0], cx);
         } else if (preview === "modal-tag" && this.commits.length > 0) {
@@ -1857,10 +1872,15 @@ export default class GitGraph extends View {
     cx.notify();
   }
 
+  /** Classify a `git branch --all` name as a remote-tracking ref. */
+  branchRefKind(name) {
+    return this.remotes.some((remote) => name.startsWith(`${remote}/`)) ? "remote" : "local";
+  }
+
   openBranchContextMenu(ref, e, cx, overrideX, overrideY) {
-    const normRef = typeof ref === "string" ? { kind: ref.startsWith("origin/") ? "remote" : "branch", text: ref } : ref;
-    const menuWidth = 220;
-    const menuHeight = 150;
+    const normRef = typeof ref === "string" ? { kind: this.branchRefKind(ref), text: ref } : ref;
+    const menuWidth = 260;
+    const menuHeight = 180;
     const origin = this.rootOrigin;
     const b = /** @type {any} */ (this.rootBounds);
     let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
@@ -2006,6 +2026,9 @@ export default class GitGraph extends View {
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
+    } else if (type === "confirm-merge-branch") {
+      this.modalDialog = { type, ref: target?.ref || target, error: null };
+      this.modalInput = null;
     } else if (type.startsWith("confirm-")) {
       this.modalDialog = { type, commit: target?.commit || target, ref: target?.ref, error: null };
       this.modalInput = null;
@@ -2056,11 +2079,6 @@ export default class GitGraph extends View {
         return;
       }
     }
-    if (type === "publish" && (!this.hasHead || this.detached)) {
-      dialog.error = this.hasHead ? "Cannot push from a detached HEAD" : "This repository has no commits yet";
-      cx.notify();
-      return;
-    }
     if (type === "stash") {
       stashMessage = this.modalInput?.value().trim() || "";
       if (dialog.stashStaged && this.stagedCount === 0) {
@@ -2068,6 +2086,16 @@ export default class GitGraph extends View {
         cx.notify();
         return;
       }
+    }
+    if (type === "publish" && (!this.hasHead || this.detached)) {
+      dialog.error = this.hasHead ? "Cannot push from a detached HEAD" : "This repository has no commits yet";
+      cx.notify();
+      return;
+    }
+    if (type === "confirm-merge-branch" && !ref?.text) {
+      dialog.error = "No branch selected";
+      cx.notify();
+      return;
     }
 
     this.busy = true;
@@ -2252,6 +2280,21 @@ export default class GitGraph extends View {
           if (r.code === 0) {
             this.closeModal(cx);
             notify({ title: "Merge complete", body: `Merged into ${this.currentBranch}`, level: "success" });
+            this.refresh(cx);
+          } else {
+            this.closeModal(cx);
+            notify({ title: "Merge conflict/error", body: (r.stderr || r.stdout).trim(), level: "error" });
+            this.refresh(cx);
+          }
+        } else if (type === "confirm-merge-branch") {
+          const r = await exec("git", [...NON_INTERACTIVE, "merge", "--no-edit", "--end-of-options", ref.text], { cwd: root, on });
+          if (r.code === 0) {
+            this.closeModal(cx);
+            notify({
+              title: "Merge complete",
+              body: `Merged '${ref.text}' into ${this.currentBranch}`,
+              level: "success",
+            });
             this.refresh(cx);
           } else {
             this.closeModal(cx);
@@ -3743,6 +3786,11 @@ export default class GitGraph extends View {
                     .when(isActive, (el) => el.bg(color(t.selected)).font_semibold())
                     .hover((s) => s.bg(color(isActive ? t.selected : t.hover)))
                     .on_click((_e, cx) => this.setBranchFilter(bName, cx))
+                    .on_mouse_down("right", (e, cx) => {
+                      cx.stop_propagation();
+                      this.branchDropdownOpen = false;
+                      this.openBranchContextMenu(bName, e, cx);
+                    })
                     .child(svg("mods/git-graph/icons/branch.svg").size(11).text_color(color(t.dim)))
                     .child(div().flex_1().truncate().child(bName));
                 })
@@ -4325,6 +4373,7 @@ export default class GitGraph extends View {
       const ref = cMenu.ref;
       const isRemote = ref.kind === "remote";
       const bName = ref.text;
+      const isCurrent = !isRemote && bName === this.currentBranch;
 
       return div()
         .id("context-menu-backdrop")
@@ -4338,7 +4387,7 @@ export default class GitGraph extends View {
             .absolute()
             .left(cMenu.x)
             .top(cMenu.y)
-            .w(220)
+            .w(260)
             .p(4)
             .rounded(8)
             .bg(color(t.popover))
@@ -4402,6 +4451,45 @@ export default class GitGraph extends View {
                     .child(svg("mods/git-graph/icons/commit.svg").size(12).text_color(color(t.dim)))
                 )
                 .child(div().child(`Checkout ${isRemote ? "Tracking Branch" : "Branch"}`))
+            )
+            // Merge into current branch (the checked-out branch cannot merge itself)
+            .child(
+              h_flex()
+                .id("bmenu-merge")
+                .h(26)
+                .px(8)
+                .gap(6)
+                .items_center()
+                .rounded(5)
+                .when(isCurrent, (e) => e.opacity(0.45).cursor_not_allowed())
+                .when(!isCurrent, (e) =>
+                  e
+                    .cursor_pointer()
+                    .hover((s) => s.bg(color(t.hover)))
+                    .on_click((_e, cx) => this.openModal("confirm-merge-branch", { ref }, cx))
+                )
+                .child(
+                  div()
+                    .w(14)
+                    .h(14)
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg("mods/git-graph/icons/merge.svg").size(12).text_color(color(isCurrent ? t.muted : t.dim)))
+                )
+                .child(
+                  div()
+                    .flex_1()
+                    .min_w(0)
+                    .truncate()
+                    .text_color(color(isCurrent ? t.muted : t.foreground))
+                    .child(
+                      isCurrent
+                        ? "Merge into Current Branch (checked out)"
+                        : `Merge '${bName}' into Current Branch…`
+                    )
+                )
             )
             // Delete branch (local only)
             .when(!isRemote, (e) =>
@@ -4628,6 +4716,8 @@ export default class GitGraph extends View {
                       ? `Revert Commit ${commit.shortHash}`
                       : dialog.type === "confirm-merge"
                       ? `Merge into '${this.currentBranch || "HEAD"}'`
+                      : dialog.type === "confirm-merge-branch"
+                      ? `Merge '${dialog.ref?.text || "branch"}' into '${this.currentBranch || "HEAD"}'`
                       : dialog.type === "confirm-rebase"
                       ? `Rebase '${this.currentBranch || "HEAD"}' on ${commit.shortHash}`
                       : dialog.type === "confirm-delete-branch"
@@ -4664,6 +4754,8 @@ export default class GitGraph extends View {
                       ? `Create a new commit reverting changes from ${commit.shortHash}`
                       : dialog.type === "confirm-merge"
                       ? `Merge commit ${commit.shortHash} ("${commit.subject}") into '${this.currentBranch}'`
+                      : dialog.type === "confirm-merge-branch"
+                      ? `Merge branch '${dialog.ref?.text}' into the current branch '${this.currentBranch}'`
                       : dialog.type === "confirm-rebase"
                       ? `Rebase current branch '${this.currentBranch}' onto ${commit.shortHash}`
                       : dialog.type === "confirm-delete-branch"
@@ -5086,6 +5178,8 @@ export default class GitGraph extends View {
                       : dialog.type === "confirm-revert"
                       ? "Revert"
                       : dialog.type === "confirm-merge"
+                      ? "Merge"
+                      : dialog.type === "confirm-merge-branch"
                       ? "Merge"
                       : dialog.type === "confirm-rebase"
                       ? "Rebase"
