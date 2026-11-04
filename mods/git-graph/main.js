@@ -1997,176 +1997,112 @@ export default class GitGraph extends View {
     const height = 30;
     const centerY = 15;
     const startX = 12;
+    const strokeW = 2;
     const elements = [];
+    const laneX = (lane) => startX + lane * laneWidth;
+    const laneColor = (idx) => color(getLaneColor(idx, t));
+    const wtColor = color(t.working || t.ansi3 || t.accent);
 
-    // 1. Pass-through vertical rails
-    for (const p of commit.passThroughLanes) {
-      const railColor = color(getLaneColor(p.colorIdx ?? p.lane, t));
-      elements.push(
-        div()
-          .id(`rail-${commit.hash}-${p.lane}`)
-          .absolute()
-          .left(startX + p.lane * laneWidth - 1)
-          .top(0)
-          .w(2)
-          .h(height)
-          .bg(railColor)
-      );
-    }
-
-    const myColor = commit.isWorkingTree
-      ? color(t.working || t.ansi3 || t.accent)
-      : color(getLaneColor(commit.colorIdx ?? commit.lane, t));
-
-    // 2. Converging lanes (from child branches merging into this commit)
-    if (commit.convergingLanes && commit.convergingLanes.length > 0) {
-      for (const c of commit.convergingLanes) {
-        const cLane = c.lane;
-        const cColor = color(getLaneColor(c.colorIdx ?? cLane, t));
-        const x1 = startX + cLane * laneWidth;
-        const x2 = startX + commit.lane * laneWidth;
-        const minX = Math.min(x1, x2);
-        const maxX = Math.max(x1, x2);
-
-        elements.push(div().id(`conv-top-${commit.hash}-${cLane}`).absolute().left(x1 - 1).top(0).w(2).h(8).bg(cColor));
-        elements.push(
+    // Every edge runs node-row center to node-row center as one cosine S-curve
+    // (vertical at both ends), split across the two rows it crosses: the upper
+    // half is drawn in the row it leaves, the lower half in the row it enters.
+    // Curves are sampled as overlapping 1px-step slices (stroke-tall, so slopes
+    // keep the rail weight); working-tree edges are dotted.
+    const edge = (id, e, half) => {
+      const c = e.fromWorkingTree ? wtColor : laneColor(e.colorIdx);
+      const x1 = laneX(e.from);
+      const dx = laneX(e.to) - x1;
+      // Row-local y range and the matching span of the full curve (0..1).
+      const y0 = half === "down" ? centerY : 0;
+      const y1 = half === "down" ? height : centerY;
+      const v0 = half === "down" ? 0 : 0.5;
+      const at = (y) => {
+        const v = v0 + ((y - y0) / (y1 - y0)) * 0.5;
+        return x1 + (dx * (1 - Math.cos(Math.PI * v))) / 2;
+      };
+      if (dx === 0 && !e.fromWorkingTree) {
+        return [
           div()
-            .id(`conv-bus-${commit.hash}-${cLane}`)
+            .id(id)
             .absolute()
-            .left(minX - 1)
-            .top(8)
-            .w(maxX - minX + 2)
-            .h(2)
-            .bg(cColor)
-        );
-        elements.push(div().id(`conv-step-${commit.hash}-${cLane}`).absolute().left(x2 - 1).top(8).w(2).h(centerY - 8).bg(cColor));
+            .left(x1 - strokeW / 2)
+            .top(y0)
+            .w(strokeW)
+            .h(y1 - y0)
+            .bg(c),
+        ];
       }
-    }
+      const out = [];
+      for (let y = y0; y < y1; y++) {
+        if (e.fromWorkingTree && y % 4 >= 2) continue;
+        const xa = at(y);
+        const xb = at(y + 1);
+        out.push(
+          div()
+            .id(`${id}-s${y}`)
+            .absolute()
+            .left(Math.min(xa, xb) - strokeW / 2)
+            .top(y)
+            .w(Math.abs(xb - xa) + strokeW)
+            .h(Math.min(strokeW, y1 - y))
+            .bg(c)
+        );
+      }
+      return out;
+    };
 
-    // 3. Incoming line from child above
-    if (commit.fromChild) {
+    (commit.edgesUp || []).forEach((e, i) => {
+      elements.push(...edge(`up-${commit.hash}-${i}`, e, "up"));
+    });
+    (commit.edgesDown || []).forEach((e, i) => {
+      elements.push(...edge(`down-${commit.hash}-${i}`, e, "down"));
+    });
+
+    const myColor = commit.isWorkingTree ? wtColor : laneColor(commit.colorIdx ?? commit.lane);
+    const cx0 = laneX(commit.lane);
+
+    // Parents outside the loaded view: a fading stub to the row bottom.
+    commit.parentConnections.forEach((conn, idx) => {
+      if (!conn.terminated) return;
       elements.push(
         div()
-          .id(`in-${commit.hash}`)
+          .id(`term-${commit.hash}-${idx}`)
           .absolute()
-          .left(startX + commit.lane * laneWidth - 1)
-          .top(0)
-          .w(2)
-          .h(centerY)
+          .left(cx0 - strokeW / 2)
+          .top(centerY)
+          .w(strokeW)
+          .h(height - centerY)
           .bg(myColor)
+          .opacity(0.5)
       );
-    }
+    });
 
-    // 4. Outgoing lines to parents below
-    for (let idx = 0; idx < commit.parentConnections.length; idx++) {
-      const conn = commit.parentConnections[idx];
-      const connColor = color(getLaneColor(conn.colorIdx ?? conn.toLane, t));
-
-      if (conn.terminated) {
-        // Parent is outside view: render a stub line terminating at row bottom
-        elements.push(
-          div()
-            .id(`term-${commit.hash}-${idx}`)
-            .absolute()
-            .left(startX + commit.lane * laneWidth - 1)
-            .top(centerY)
-            .w(2)
-            .h(height - centerY)
-            .bg(myColor)
-            .opacity(0.6)
-        );
-      } else if (conn.toLane === commit.lane) {
-        elements.push(
-          div()
-            .id(`parent-${commit.hash}-${idx}`)
-            .absolute()
-            .left(startX + commit.lane * laneWidth - 1)
-            .top(centerY)
-            .w(2)
-            .h(height - centerY)
-            .bg(connColor)
-        );
-      } else {
-        const x1 = startX + commit.lane * laneWidth;
-        const x2 = startX + conn.toLane * laneWidth;
-        const minX = Math.min(x1, x2);
-        const maxX = Math.max(x1, x2);
-
-        elements.push(div().id(`p-down-${commit.hash}-${idx}`).absolute().left(x1 - 1).top(centerY).w(2).h(7).bg(connColor));
-        elements.push(
-          div()
-            .id(`p-bus-${commit.hash}-${idx}`)
-            .absolute()
-            .left(minX - 1)
-            .top(22)
-            .w(maxX - minX + 2)
-            .h(2)
-            .bg(connColor)
-        );
-        elements.push(div().id(`p-step-${commit.hash}-${idx}`).absolute().left(x2 - 1).top(22).w(2).h(height - 22).bg(connColor));
-      }
-    }
-
-    // 5. Commit node outer ring if HEAD
-    if (commit.isHead) {
-      elements.push(
-        div()
-          .id(`head-ring-${commit.hash}`)
-          .absolute()
-          .left(startX + commit.lane * laneWidth - 7)
-          .top(centerY - 7)
-          .size(14)
-          .rounded_full()
-          .border_2()
-          .border_color(color(t.accent))
-      );
-    }
-
-    // 6. Commit node circle / merge commit indicator / WT indicator
-    const isMerge = commit.parents && commit.parents.length > 1;
+    // Node: a solid dot; the working tree is a hollow ring; HEAD adds a halo.
+    const node = (size) =>
+      div()
+        .id(`node-${commit.hash}`)
+        .absolute()
+        .left(cx0 - size / 2)
+        .top(centerY - size / 2)
+        .size(size)
+        .rounded_full();
     if (commit.isWorkingTree) {
-      elements.push(
-        div()
-          .id("wt-node")
-          .absolute()
-          .left(startX + commit.lane * laneWidth - 4)
-          .top(centerY - 4)
-          .size(8)
-          .rounded_full()
-          .bg(myColor)
-          .border_1()
-          .border_color(color(t.background))
-      );
-    } else if (isMerge) {
-      elements.push(
-        div()
-          .id(`node-${commit.hash}`)
-          .absolute()
-          .left(startX + commit.lane * laneWidth - 5)
-          .top(centerY - 5)
-          .size(10)
-          .rounded_full()
-          .bg(color(t.background))
-          .border_2()
-          .border_color(myColor)
-          .flex()
-          .items_center()
-          .justify_center()
-          .child(div().id(`node-dot-${commit.hash}`).size(4).rounded_full().bg(myColor))
-      );
+      elements.push(node(11).bg(color(t.background)).border_2().border_color(wtColor));
     } else {
-      elements.push(
-        div()
-          .id(`node-${commit.hash}`)
-          .absolute()
-          .left(startX + commit.lane * laneWidth - 4)
-          .top(centerY - 4)
-          .size(8)
-          .rounded_full()
-          .bg(myColor)
-          .border_1()
-          .border_color(color(t.background))
-      );
+      if (commit.isHead) {
+        elements.push(
+          div()
+            .id(`head-ring-${commit.hash}`)
+            .absolute()
+            .left(cx0 - 8)
+            .top(centerY - 8)
+            .size(16)
+            .rounded_full()
+            .border_2()
+            .border_color(myColor)
+        );
+      }
+      elements.push(node(10).bg(myColor));
     }
 
     const totalGraphWidth = Math.max(64, startX + (this.maxLane + 1) * laneWidth + 12);
@@ -2260,24 +2196,53 @@ export default class GitGraph extends View {
     // HEAD is folded into the checked-out branch pill (like Git Graph's ✓ main)
     // instead of being painted as a separate badge.
     const refs = [];
-    let headPending = false;
-    for (const ref of commit.refs) {
-      if (ref.kind === "head") {
-        headPending = true;
+    for (let i = 0; i < commit.refs.length; i++) {
+      const ref = commit.refs[i];
+      if (ref.kind !== "head") {
+        refs.push(ref);
         continue;
       }
-      refs.push(headPending && ref.kind === "local" ? { ...ref, isHead: true } : ref);
-      headPending = false;
+      const next = commit.refs[i + 1];
+      if (next && next.kind === "local") {
+        refs.push({ ...next, isHead: true });
+        i++;
+      } else {
+        refs.push(ref);
+      }
     }
-    if (headPending) refs.push({ kind: "head", text: "HEAD" });
+
+    // A local branch and its matching remote at the same commit share one pill:
+    // `main | origin`, like VS Code's ref label. Remote-only refs keep the full
+    // `origin/main` label.
+    const pairedRemoteTexts = new Set();
+    const pairByLocal = new Map();
+    for (const ref of refs) {
+      if (ref.kind !== "local") continue;
+      const remote = refs.find(
+        (r) => r.kind === "remote" && !pairedRemoteTexts.has(r.text) && r.text.endsWith("/" + ref.text)
+      );
+      if (remote) {
+        pairedRemoteTexts.add(remote.text);
+        pairByLocal.set(ref.text, remote);
+      }
+    }
+    const displayRefs = [];
+    for (const ref of refs) {
+      if (ref.kind === "remote" && pairedRemoteTexts.has(ref.text)) continue;
+      displayRefs.push(
+        ref.kind === "local" && pairByLocal.has(ref.text)
+          ? { ...ref, pairedRemote: pairByLocal.get(ref.text) }
+          : ref
+      );
+    }
 
     // Q5 & Q1: Cap badges to max 2 + "+N" chip if > 3 (or > 2 in compact)
     const maxVisibleRefs = isCompact ? 2 : 3;
-    let visibleRefs = refs;
+    let visibleRefs = displayRefs;
     let extraRefCount = 0;
-    if (refs.length > maxVisibleRefs) {
-      visibleRefs = refs.slice(0, 2);
-      extraRefCount = refs.length - 2;
+    if (displayRefs.length > maxVisibleRefs) {
+      visibleRefs = displayRefs.slice(0, 2);
+      extraRefCount = displayRefs.length - 2;
     }
 
     commit._badgeBoxes = [];
@@ -2295,18 +2260,27 @@ export default class GitGraph extends View {
       const maxBadgeW = isCompact ? 118 : 190;
       if (ref.kind === "head") return 46;
       const textWidth = Math.ceil(ref.text.length * 6.2);
-      return Math.min(maxBadgeW, 28 + textWidth + (ref.kind === "remote" ? 6 : 0));
+      if (ref.pairedRemote) {
+        const remoteW = Math.ceil((ref.pairedRemote.text.split("/")[0] || "").length * 6.2);
+        return Math.min(maxBadgeW, 34 + textWidth + remoteW);
+      }
+      return Math.min(maxBadgeW, 28 + textWidth);
     };
 
     const renderedBadges = visibleRefs.map((ref, idx) => {
       const badgeW = badgeWidth(ref);
 
-      commit._badgeBoxes.push({
-        ref,
-        xStart: curX,
-        xEnd: curX + badgeW,
-      });
-      curX += badgeW + 4;
+      // Combined pills store two hit boxes (branch and remote) so clicking
+      // either side still filters to that ref.
+      if (ref.pairedRemote) {
+        const branchW = Math.ceil(ref.text.length * 6.2);
+        const splitAt = Math.max(12, Math.min(badgeW - 2, 21 + branchW));
+        commit._badgeBoxes.push({ ref, xStart: curX, xEnd: curX + splitAt });
+        commit._badgeBoxes.push({ ref: ref.pairedRemote, xStart: curX + splitAt, xEnd: curX + badgeW });
+      } else {
+        commit._badgeBoxes.push({ ref, xStart: curX, xEnd: curX + badgeW });
+      }
+      curX += badgeW + 5;
 
       if (ref.kind === "head") {
         return h_flex()
@@ -2332,10 +2306,42 @@ export default class GitGraph extends View {
       const bColor = isTag ? t.ansi3 : isRemote ? t.ansi5 : t.ansi4;
       const isFilteredThis = this.branchFilter === ref.text;
       const fg = isFilteredThis ? t.background : bColor;
-      // Remote refs read as `origin` chip + `/branch`, matching Git Graph.
-      const parts = isRemote ? ref.text.split("/") : [];
-      const remoteName = parts.shift() || "";
-      const remoteBranch = parts.join("/");
+
+      // Local branch + its remote: one neon pill, [⎇ main | origin].
+      if (ref.pairedRemote) {
+        const remoteName = ref.pairedRemote.text.split("/")[0] || ref.pairedRemote.text;
+        const head = Boolean(ref.isHead);
+        const remoteFiltered = this.branchFilter === ref.pairedRemote.text;
+
+        return h_flex()
+          .id(`ref-pair-${commit.hash}-${idx}-${ref.text}`)
+          .w(badgeW)
+          .flex_none()
+          .gap(4)
+          .items_center()
+          .px(5)
+          .py(1)
+          .rounded(5)
+          .bg(color(bColor + "26"))
+          .border_1()
+          .border_color(color(bColor + "77"))
+          .text_color(color(bColor))
+          .text_size(10)
+          .overflow_hidden()
+          .child(
+            svg(`mods/git-graph/icons/${head ? "check" : "branch"}.svg`)
+              .size(10)
+              .flex_none()
+          )
+          .child(div().min_w(0).truncate().font_medium().child(ref.text))
+          .child(div().w(1).h(9).flex_none().bg(color(bColor + "66")))
+          .child(
+            div()
+              .flex_none()
+              .text_color(color(remoteFiltered ? bColor : bColor + "b3"))
+              .child(remoteName)
+          );
+      }
 
       return h_flex()
         .id(`ref-${ref.kind}-${commit.hash}-${idx}-${ref.text}`)
@@ -2357,20 +2363,7 @@ export default class GitGraph extends View {
             .size(10)
             .flex_none()
         )
-        .when(isRemote && remoteBranch, (e) =>
-          e
-            .child(
-              div()
-                .flex_none()
-                .px(3)
-                .rounded(3)
-                .text_size(9)
-                .bg(color(isFilteredThis ? t.background + "2e" : bColor + "3d"))
-                .child(remoteName)
-            )
-            .child(div().min_w(0).truncate().child(`/${remoteBranch}`))
-        )
-        .when(!isRemote || !remoteBranch, (e) => e.child(div().min_w(0).truncate().child(ref.text)));
+        .child(div().min_w(0).truncate().child(ref.text));
     });
 
     if (extraRefCount > 0) {
@@ -2380,7 +2373,7 @@ export default class GitGraph extends View {
         xStart: curX,
         xEnd: curX + extraW,
       });
-      curX += extraW + 4;
+      curX += extraW + 5;
 
       renderedBadges.push(
         div()
@@ -2466,7 +2459,7 @@ export default class GitGraph extends View {
               .truncate()
               .text_size(11)
               .text_color(color(t.muted))
-              .child(formatRelativeTime(commit.timestamp))
+              .child(formatRelativeTime(commit.timestamp, true))
           )
           // Author
           .when(!isCompact, (e) =>

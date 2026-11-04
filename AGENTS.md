@@ -34,12 +34,16 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
 - **Topological DAG Lane Allocation & Clean Termination**:
   - Modularized in `mods/git-graph/git-logic.js` for pure logic testability.
   - `computeLanes(commits)` allocates lanes without duplicate parent hashes in `activeLanes` and assigns stable colors via `colorIdx`.
-  - Accurately renders converging lanes from children merging into a parent, pass-through vertical rails, outgoing connections to parents, merge commit indicators, and a distinct outer ring for HEAD.
+  - `computeLanes` also records, per row, the edges crossing its top and bottom (`edgesUp` / `edgesDown`: `{ from, to, colorIdx }` lanes). Every edge runs node-row center to node-row center as one cosine S-curve; `renderGraphLanes` draws its upper half in the row it leaves and its lower half in the row it enters, so splits and merges bend over a full row.
+  - A first-parent edge keeps the child's color while it bends, so a side branch rejoins its base in its own color. Edges from the working tree are dotted.
+  - Commits are solid dots (merges included), HEAD gets a halo ring, and the working tree is a hollow ring.
   - Parents outside the current branch or filtered view gracefully terminate at the row edge (`terminated: true`) without leaving zombie rails across unrelated commits.
   - Dynamically recalculates lanes on filtered commit subsets when searching or switching branch reachability.
 - **Virtualized High-Performance Commit Table**:
   - Uses `uniform_list` with `Scrollbar.vertical` for smooth 60fps scrolling across repositories with thousands of commits.
   - **Never register event handlers inside the row renderer** (`on_click`, `on_size_change`, `on_hover`, …): the runtime throws and the whole visible slice disappears, leaving a blank list. Use `on_item_click` / `on_item_secondary_click` on the list and compute per-badge hit boxes from the fixed widths the rows are laid out with.
+  - Every row carries a 1px bottom rule and a vertical rule closes the graph column; the header mirrors those columns (`Graph / Description / Date / Author / Commit`).
+  - HEAD folds into the checked-out branch pill (a check icon plus the branch name) instead of a separate badge. A local branch and its matching remote share one neon pill (`⎇ main | origin`); a remote without its local branch keeps its full `origin/main` label. Tags keep the tag icon.
   - Implements pagination with a "Load 500 more commits..." button and commit count status in the toolbar.
 - **Branch Selection Filter & Ref Context Menu**:
   - Toolbar dropdown allows selecting "All branches" (`--all`), "Current branch" (`HEAD`), or any specific local/remote branch (`git log <branch>`).

@@ -5,14 +5,15 @@ export function countLines(text) {
   return text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 }
 
-export function formatRelativeTime(epochSec) {
+export function formatRelativeTime(epochSec, short = false) {
   if (!epochSec) return "";
   const now = Math.floor(Date.now() / 1000);
   const diff = now - epochSec;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
+  const suffix = short ? "" : " ago";
+  if (diff < 60) return short ? "now" : "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m${suffix}`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h${suffix}`;
+  if (diff < 2592000) return `${Math.floor(diff / 86400)}d${suffix}`;
   const date = new Date(epochSec * 1000);
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
@@ -155,6 +156,8 @@ export function computeLanes(commits) {
   let nextColorIdx = 0;
   let maxGlobalLane = 0;
   const commitHashes = new Set(commits.map((c) => c.hash));
+  // Edges leaving the previous row, waiting to learn where they land in this one.
+  let pending = [];
 
   for (let i = 0; i < commits.length; i++) {
     const commit = commits[i];
@@ -200,6 +203,18 @@ export function computeLanes(commits) {
 
     commit.lane = lane;
     commit.colorIdx = colorIdx;
+
+    // Resolve the edges crossing the boundary above this row. An edge that
+    // carries this commit's hash lands on its node; any other keeps its slot.
+    // Each edge is drawn as one S-curve from the previous node row to this
+    // one: the upper half in the previous row, the lower half here.
+    commit.edgesUp = pending.map((e) => ({
+      from: e.from,
+      to: e.hash === hash ? lane : e.slot,
+      colorIdx: e.colorIdx,
+      fromWorkingTree: e.fromWorkingTree,
+    }));
+    if (i > 0) commits[i - 1].edgesDown = commit.edgesUp;
 
     // Pass-through lanes: lanes that continue across this commit row
     commit.passThroughLanes = [];
@@ -275,6 +290,28 @@ export function computeLanes(commits) {
       activeLaneColors.pop();
     }
 
+    // Edges leaving this row: every pass-through rail plus every live parent link.
+    pending = [
+      ...commit.passThroughLanes.map((p) => ({
+        from: p.lane,
+        slot: p.lane,
+        hash: activeLanes[p.lane],
+        colorIdx: p.colorIdx,
+      })),
+      // A first-parent edge keeps this commit's color even when it bends into
+      // another lane, so a side branch rejoins its base in its own color.
+      ...commit.parentConnections
+        .filter((c) => !c.terminated)
+        .map((c) => ({
+          from: lane,
+          slot: c.toLane,
+          hash: c.parentHash,
+          colorIdx: c.parentHash === parents[0] ? colorIdx : c.colorIdx,
+          fromWorkingTree: !!commit.isWorkingTree,
+        })),
+    ];
+    commit.edgesDown = [];
+
     const rowMax = Math.max(
       lane,
       ...commit.passThroughLanes.map((p) => p.lane),
@@ -284,6 +321,16 @@ export function computeLanes(commits) {
     );
     if (rowMax > maxGlobalLane) maxGlobalLane = rowMax;
     commit.maxLaneAtRow = rowMax;
+  }
+  // A view cut by pagination leaves the last row's edges running off the bottom.
+  const last = commits[commits.length - 1];
+  if (last) {
+    last.edgesDown = pending.map((e) => ({
+      from: e.from,
+      to: e.slot,
+      colorIdx: e.colorIdx,
+      fromWorkingTree: e.fromWorkingTree,
+    }));
   }
 
   return maxGlobalLane;

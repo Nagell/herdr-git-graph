@@ -13,10 +13,13 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Modularized pure DAG logic in `mods/git-graph/git-logic.js`.
   - Non-overlapping branch rails with topological ordering and stable stream coloring.
   - Clear visual indicators for merge commits, converging branches, and outgoing parent connections.
+  - Rounded S-bends join lanes instead of hard right angles, with pass-through rails kept crisp.
   - Distinct outer ring marking the active `HEAD` commit.
   - Graceful termination for parent links outside the branch reachability or filter scope, preventing broken or infinite pass-through rails.
 - **Virtualized High-Performance Commit List**:
   - Powered by `uniform_list` with `Scrollbar.vertical` for smooth 60fps scrolling across large codebases.
+  - Table layout with a ruled graph column, per-row separators, and `Graph / Description / Date / Author / Commit` headers.
+  - Ref pills are rounded, tinted badges: `HEAD` folds into the checked-out branch as a check pill, a local branch and its matching remote collapse into one pill (`⎇ main | origin`), a remote without its local branch keeps `⎇ origin/main`, and tags keep the tag icon.
   - Pagination with "Load 500 more commits..." button and commit count status in toolbar.
 - **In-Progress Operation Detection & Banner**:
   - Automatically identifies in-progress merges (`MERGE_HEAD`), rebases (`rebase-merge/`, `rebase-apply/`), cherry-picks (`CHERRY_PICK_HEAD`), and reverts (`REVERT_HEAD`).
@@ -76,13 +79,14 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - `b` toggles branch scope (`--all` vs. current branch).
 - **Responsive Layout**:
   - Dynamically measures container width via `on_size_change`.
-  - In compact panes (< 560px), hides the brand text, collapses author and SHA columns and shows the details panel as a full-width file tree.
+  - In compact panes (< 560px), hides the brand text, collapses the author and commit columns and shows the details panel as a full-width file tree.
   - `panel: true` docks it in a layout sidebar with the Files-style card; the toolbar flexes the branch selector and adds an expand button for the full-size tab.
 
 ## Requirements
 
 - Herdr desktop app (`herdr-app`).
 - Git installed on your system.
+- GitHub CLI (`gh`) authenticated with `gh auth login` for the optional **Publish to GitHub** push flow.
 - OpenCode CLI (`opencode`) for the optional background **Clean tree** agent button.
 
 ## Usage

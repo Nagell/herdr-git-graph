@@ -10,11 +10,12 @@ Inside any Herdr split pane, dedicated tab, or sidebar panel, you see a full vis
 
 - **Toolbar**: Shows the mod brand with vector branch icon, branch selector dropdown (`All branches`, `Current branch`, or specific branch) with ahead/behind counts, one-click **Fetch** / **Pull** / **Push** buttons, a background **Clean tree** agent button, search filter input, commit counter, and refresh button.
 - **Commit Table**:
-  - **Graph column**: Multi-color topological DAG lanes with converging child lines, pass-through rails, outgoing parent connections with clean edge termination, merge commit markers, and HEAD indicator ring. Virtualized with `uniform_list` and vertical scrollbar for fluid performance.
-  - **Commit & Refs column**: Clickable branch badges (local/remote), tag badges with tag vector icons, HEAD badge, and commit subject. Right-clicking a branch badge allows checkout, deletion, or copying name.
+  - **Graph column**: Multi-color topological DAG lanes with smooth node-to-node S-curves that span a full row, side branches that keep their color when they rejoin, pass-through rails, clean edge termination, solid commit dots, and a HEAD halo ring. Virtualized with `uniform_list` and vertical scrollbar for fluid performance.
+  - **Commit & Refs column**: Rounded, tinted, clickable ref pills: local branches (`⎇ main`), remote branches without a local counterpart (`⎇ origin/main`), and a local branch paired with its matching remote in one pill (`⎇ main | origin`). Tags keep the tag icon, and the checked-out branch is a `✓ branch` pill. Commit subject follows the pills. Right-clicking a branch badge allows checkout, deletion, or copying name.
+  - **Date column**: Compact relative commit timestamp (`now`, `5m`, `2d`); the details panel spells out the `ago` form.
   - **Author column**: Commit author name (collapses on compact screens).
-  - **Date column**: Relative commit timestamp (`just now`, `5m ago`, `2d ago`).
-  - **SHA column**: Monospace short hash (collapses on compact screens).
+  - **Commit column**: Monospace short hash (collapses on compact screens).
+  - The list is a ruled table: a 1px vertical rule closes the graph column and every row carries a bottom separator, with `Graph / Description / Date / Author / Commit` headers.
 - **Working Tree Row**: If uncommitted changes exist, a top "DIRTY" row displays with added/deleted counters and connects directly downwards to HEAD in lane 0.
 - **In-Progress Banner**: Displays an alert banner during ongoing merges, rebases, cherry-picks, or reverts with one-click Continue and Abort buttons.
 - **Details & Diff Tabs**:
