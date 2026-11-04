@@ -67,8 +67,11 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - `props: { panel: true }` renders the graph as the Files-style card inside a layout panel, such as Herdr's Changes slot.
   - The toolbar stays compact: the brand text is dropped, the branch selector flexes into the free width, and an expand button opens the same repository full size in a tab.
 - **Commit Details Tree View & Diff Tabs**:
-  - Changed files are organized in a hierarchical tree view with collapsible/expandable directory nodes and chevron toggles (`chevron-down.svg` / `chevron-right.svg`).
-  - Folders with changes are expanded by default.
+  - Changed files use a VS Code Source Control-style tree: a fixed **Changes** header with a count badge and collapse-all chevron, nested folder rows with indent guide lines, and no folder icons.
+  - File rows show a colored language badge (`JS`, `TS`, `#` for CSS, `{}` for JSON, …) or the generic file icon, with the porcelain status letter (`M`/`A`/`D`/`U`) on the right.
+  - Folders with changes are expanded by default; the header collapses or expands all of them. File rows show colored `+added` / `−deleted` counts (green/red) beside the status; untracked files get their line count from `wc -l` so they show `+N` too.
+  - The bottom details pane is a native `v_resizable` split: drag its top divider to trade height between the commit list and the file tree, and the size is kept across repaints.
+  - The commit message wraps and grows to its content, up to 200px (150px in compact mode), then scrolls instead of clipping the description.
   - Clicking any file opens its diff in a dedicated Herdr tab (`Diff · <file>`) rendered with `v_virtual_list`: old/new line gutters, `+`/`−` backgrounds from `t.ansi2`/`t.ansi1`, styled hunk headers, and horizontal scrolling for long lines.
   - The toolbar switches between **Inline** (unified), **Split** (side by side) and **Stacked** (old above new). The choice persists in `shared("git-graph.diffView")`. Both split panes use one `VirtualListScrollHandle`, so vertical scrolling stays in lockstep while each pane keeps its own horizontal scrollbar.
   - `git-logic.js` pairs each removed line with its added counterpart and computes character-level change ranges (`intraLineDiff`): word-level LCS first, character refinement inside changed words, and a whole-middle fallback for rewrites. `lineSegments` overlays those ranges on the syntax spans, which the renderer paints with a stronger `ansi1`/`ansi2` background.

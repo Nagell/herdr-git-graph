@@ -3,7 +3,17 @@
 // working tree inspection, hierarchical file tree, and interactive diff viewer.
 
 import { View, div, svg, uniform_list } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, v_virtual_list, Scrollbar, VirtualListScrollHandle } from "gpui-base";
+import {
+  v_flex,
+  h_flex,
+  InputState,
+  Input,
+  v_virtual_list,
+  Scrollbar,
+  VirtualListScrollHandle,
+  v_resizable,
+  resizable_panel,
+} from "gpui-base";
 import {
   spaces,
   panes,
@@ -61,6 +71,91 @@ const CLEAN_AGENT_LABEL = "OpenCode Mini";
 
 /** @param {any} c @returns {`#${string}`} */
 const color = (c) => /** @type {`#${string}`} */ (c);
+
+/**
+ * VS Code-like language badge for a changed file: a small colored square with
+ * a short label. Unknown extensions return null and get the generic file icon.
+ * @param {string} name
+ */
+function fileTypeBadge(name) {
+  const base = String(name || "").toLowerCase();
+  const ext = base.includes(".") ? base.split(".").pop() : "";
+  const special = {
+    dockerfile: ["DK", "#2496ed", "#ffffff"],
+    makefile: ["MK", "#6d8086", "#ffffff"],
+    ".gitignore": ["GI", "#f14e32", "#ffffff"],
+    ".env": ["E", "#ecd53f", "#1e1e1e"],
+    ".editorconfig": ["EC", "#6d8086", "#ffffff"],
+  };
+  const types = {
+    js: ["JS", "#f1e05a", "#1e1e1e"],
+    mjs: ["JS", "#f1e05a", "#1e1e1e"],
+    cjs: ["JS", "#f1e05a", "#1e1e1e"],
+    jsx: ["JS", "#f1e05a", "#1e1e1e"],
+    ts: ["TS", "#3178c6", "#ffffff"],
+    mts: ["TS", "#3178c6", "#ffffff"],
+    cts: ["TS", "#3178c6", "#ffffff"],
+    tsx: ["TS", "#3178c6", "#ffffff"],
+    css: ["#", "#2965f1", "#ffffff"],
+    scss: ["#", "#c6538c", "#ffffff"],
+    sass: ["#", "#c6538c", "#ffffff"],
+    less: ["#", "#1d365d", "#ffffff"],
+    html: ["<>", "#e44d26", "#ffffff"],
+    htm: ["<>", "#e44d26", "#ffffff"],
+    vue: ["V", "#41b883", "#1e1e1e"],
+    svelte: ["S", "#ff3e00", "#ffffff"],
+    json: ["{}", "#cbcb41", "#1e1e1e"],
+    jsonc: ["{}", "#cbcb41", "#1e1e1e"],
+    md: ["M", "#519aba", "#ffffff"],
+    mdx: ["M", "#519aba", "#ffffff"],
+    py: ["Py", "#3572a5", "#ffffff"],
+    rs: ["R", "#dea584", "#1e1e1e"],
+    go: ["GO", "#00add8", "#1e1e1e"],
+    sh: [">_", "#89e051", "#1e1e1e"],
+    bash: [">_", "#89e051", "#1e1e1e"],
+    zsh: [">_", "#89e051", "#1e1e1e"],
+    fish: [">_", "#89e051", "#1e1e1e"],
+    yml: ["Y", "#cb171e", "#ffffff"],
+    yaml: ["Y", "#cb171e", "#ffffff"],
+    toml: ["T", "#9c4221", "#ffffff"],
+    ini: ["T", "#9c4221", "#ffffff"],
+    conf: ["T", "#9c4221", "#ffffff"],
+    lock: ["L", "#f0b400", "#1e1e1e"],
+    svg: ["I", "#a074c4", "#ffffff"],
+    png: ["I", "#a074c4", "#ffffff"],
+    jpg: ["I", "#a074c4", "#ffffff"],
+    jpeg: ["I", "#a074c4", "#ffffff"],
+    gif: ["I", "#a074c4", "#ffffff"],
+    webp: ["I", "#a074c4", "#ffffff"],
+    ico: ["I", "#a074c4", "#ffffff"],
+    pdf: ["P", "#b30b00", "#ffffff"],
+    sql: ["DB", "#e38c00", "#ffffff"],
+    java: ["J", "#b07219", "#ffffff"],
+    c: ["C", "#555555", "#ffffff"],
+    h: ["C", "#555555", "#ffffff"],
+    cpp: ["C", "#f34b7d", "#ffffff"],
+    cc: ["C", "#f34b7d", "#ffffff"],
+    cxx: ["C", "#f34b7d", "#ffffff"],
+    hpp: ["C", "#f34b7d", "#ffffff"],
+    cs: ["C#", "#178600", "#ffffff"],
+    php: ["P", "#777bb4", "#ffffff"],
+    rb: ["RB", "#cc342d", "#ffffff"],
+    swift: ["S", "#f05138", "#ffffff"],
+    kt: ["K", "#a97bff", "#ffffff"],
+    kts: ["K", "#a97bff", "#ffffff"],
+    dart: ["D", "#00b4ab", "#ffffff"],
+    lua: ["L", "#000080", "#ffffff"],
+    r: ["R", "#198ce7", "#ffffff"],
+    xml: ["<>", "#e37933", "#ffffff"],
+  };
+  const hit = special[base] || types[ext];
+  return hit ? { label: hit[0], bg: hit[1], fg: hit[2] } : null;
+}
+
+/** Human label for a porcelain status code. */
+function statusLabel(status) {
+  return { M: "Modified", A: "Added", D: "Deleted", U: "Conflict", R: "Renamed" }[status] || "Changed";
+}
 
 function resolveLocation(manualRoot, currentRoot) {
   if (manualRoot) {
@@ -1179,6 +1274,26 @@ export default class GitGraph extends View {
             const s = conflict ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
             const stat = stats[filePath] ?? { add: 0, del: 0, binary: false };
             wtFiles.push({ path: filePath, status: s, fresh, ...stat });
+          }
+
+          // Untracked files have no numstat entry. Count their lines so the
+          // tree can show the same +N next to the file name.
+          const freshPaths = wtFiles.filter((f) => f.fresh).map((f) => f.path);
+          if (freshPaths.length) {
+            const wcRes = await exec("wc", ["-l", "--", ...freshPaths], { cwd: root, on });
+            if (wcRes.code === 0 && wcRes.stdout) {
+              const counts = {};
+              for (const line of wcRes.stdout.split("\n")) {
+                const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+                if (m) counts[m[2]] = Number(m[1]) || 0;
+              }
+              for (const f of wtFiles) {
+                if (f.fresh && counts[f.path] !== undefined) {
+                  f.add = counts[f.path];
+                  f.binary = false;
+                }
+              }
+            }
           }
         }
 
@@ -2483,109 +2598,425 @@ export default class GitGraph extends View {
       );
   }
 
-  renderTreeList(t, cx) {
-    if (!this.commitFiles.length) {
-      return div().p(12).text_size(11).text_color(color(t.dim)).child("No changed files in this commit");
+  /** Every directory path in a built file tree, for the collapse-all header. */
+  allFolderPaths(node, paths = []) {
+    for (const child of node.children.values()) {
+      if (child.isDir) {
+        paths.push(child.path);
+        this.allFolderPaths(child, paths);
+      }
     }
+    return paths;
+  }
 
+  /** Collapse every folder, or expand them all when they are already collapsed. */
+  toggleAllFolders(folderPaths, allCollapsed, cx) {
+    this.collapsedFolders = allCollapsed ? new Set() : new Set(folderPaths);
+    cx.notify();
+  }
+
+  /** Vertical guide lines for one tree row, one per ancestor level. */
+  treeIndentGuides(depth, t) {
+    return Array.from({ length: depth }, () =>
+      div()
+        .w(14)
+        .h_full()
+        .flex_none()
+        .border_l(1)
+        .border_color(color(t.border))
+        .opacity(0.7)
+    );
+  }
+
+  /** One VS Code-style folder or file row in the changes tree. */
+  renderTreeRow(row, t, cx) {
+    const isFileSelected = !row.isDir && this.selectedFile === row.path;
+    const badge = row.isDir ? null : fileTypeBadge(row.name);
+    const status = row.status || "M";
+    const tip = row.isDir
+      ? `${row.path}\n${row.add} added · ${row.del} removed\nClick to ${row.isExpanded ? "collapse" : "expand"}`
+      : `${row.path}\n${statusLabel(status)} · ${row.add} added · ${row.del} removed\nClick to open the diff`;
+
+    return h_flex()
+      .id(`${row.isDir ? "dir" : "file"}-${row.path}`)
+      .h(24)
+      .flex_none()
+      .w_full()
+      .pl(6)
+      .pr(8)
+      .items_center()
+      .when(isFileSelected, (e) => e.bg(color(t.selected)))
+      .hover((s) => s.bg(color(isFileSelected ? t.selected : t.hover)))
+      .cursor_pointer()
+      .tooltip(tip)
+      .on_click((_e, cx) => {
+        if (row.isDir) this.toggleFolder(row.path, cx);
+        else this.openDiffTab(row.path, cx);
+      })
+      .children(this.treeIndentGuides(row.depth, t))
+      .child(
+        div()
+          .w(16)
+          .h_full()
+          .flex_none()
+          .flex()
+          .items_center()
+          .justify_center()
+          .when(row.isDir, (e) =>
+            e.child(
+              svg(
+                row.isExpanded
+                  ? "mods/git-graph/icons/chevron-down.svg"
+                  : "mods/git-graph/icons/chevron-right.svg"
+              )
+                .size(11)
+                .text_color(color(t.dim))
+            )
+          )
+          .when(!row.isDir, (e) =>
+            e.child(
+              badge
+                ? div()
+                    .w(16)
+                    .h(16)
+                    .rounded(3)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(color(badge.bg))
+                    .child(
+                      div()
+                        .text_size(8)
+                        .font_semibold()
+                        .text_color(color(badge.fg))
+                        .child(badge.label)
+                    )
+                : svg("mods/git-graph/icons/file.svg").size(12).text_color(color(t.muted))
+            )
+          )
+      )
+      .child(
+        div()
+          .flex_1()
+          .min_w(0)
+          .pl(4)
+          .truncate()
+          .text_size(11)
+          .when(row.isDir, (e) => e.font_medium())
+          .text_color(color(t.foreground))
+          .child(row.name)
+      )
+      .when(!row.isDir, (e) =>
+        e.child(
+          div()
+            .w(16)
+            .flex_none()
+            .text_center()
+            .font_semibold()
+            .text_size(10)
+            .text_color(color(getStatusColor(status, t)))
+            .child(status)
+        )
+      )
+      .when(row.isDir, (e) =>
+        e.child(
+          div()
+            .w(16)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().w(4).h(4).rounded_full().bg(color(t.muted)).opacity(0.8))
+        )
+      )
+      // VS Code-style line counts: green additions, red deletions.
+      .when(!row.isDir && (row.add > 0 || row.del > 0), (e) =>
+        e.child(
+          h_flex()
+            .flex_none()
+            .gap(4)
+            .items_center()
+            .pl(6)
+            .when(row.add > 0, (r) =>
+              r.child(
+                div()
+                  .text_size(10)
+                  .font_medium()
+                  .text_color(color(t.ansi2))
+                  .child(`+${row.add}`)
+              )
+            )
+            .when(row.del > 0, (r) =>
+              r.child(
+                div()
+                  .text_size(10)
+                  .font_medium()
+                  .text_color(color(t.ansi1))
+                  .child(`−${row.del}`)
+              )
+            )
+        )
+      );
+  }
+
+  renderTreeList(t, cx) {
     const tree = buildFileTree(this.commitFiles);
     const rows = flattenFileTree(tree, 0, this.collapsedFolders, []);
+    const folderPaths = this.allFolderPaths(tree);
+    const allCollapsed = folderPaths.length > 0 && folderPaths.every((p) => this.collapsedFolders.has(p));
+    const count = this.commitFiles.length;
+    const add = this.commitFiles.reduce((n, f) => n + (f.add || 0), 0);
+    const del = this.commitFiles.reduce((n, f) => n + (f.del || 0), 0);
 
     return v_flex()
       .id("tree-file-list")
-      .size_full()
+      .flex_1()
       .min_h(0)
-      .overflow_y_scrollbar()
-      .p(4)
-      .gap(1)
-      .children(
-        rows.map((row) => {
-          if (row.isDir) {
-            return h_flex()
-              .id(`dir-${row.path}`)
-              .h(24)
+      .w_full()
+      // Fixed "Changes" group header, like VS Code's Source Control tree.
+      .child(
+        h_flex()
+          .id("tree-changes-header")
+          .h(28)
+          .flex_none()
+          .px(8)
+          .gap(6)
+          .items_center()
+          .bg(color(t.raised))
+          .border_b(1)
+          .border_color(color(t.border))
+          .when(folderPaths.length > 0, (e) => e.cursor_pointer().hover((s) => s.bg(color(t.hover))))
+          .tooltip(
+            `${count} changed file${count === 1 ? "" : "s"} · ${add} added · ${del} removed${
+              folderPaths.length ? "\nClick to collapse or expand every folder" : ""
+            }`
+          )
+          .on_click((_e, cx) => {
+            if (folderPaths.length) this.toggleAllFolders(folderPaths, allCollapsed, cx);
+          })
+          .child(
+            svg(
+              allCollapsed
+                ? "mods/git-graph/icons/chevron-right.svg"
+                : "mods/git-graph/icons/chevron-down.svg"
+            )
+              .size(10)
               .flex_none()
-              .pl(6 + row.depth * 14)
-              .pr(6)
-              .gap(5)
+              .text_color(color(t.dim))
+          )
+          .child(div().text_size(11).font_semibold().text_color(color(t.foreground)).child("Changes"))
+          .child(div().flex_1())
+          .child(
+            div()
+              .min_w(18)
+              .h(16)
+              .px(5)
+              .rounded_full()
+              .flex()
               .items_center()
-              .rounded(4)
-              .cursor_pointer()
-              .hover((s) => s.bg(color(t.hover)))
-              .on_click((_e, cx) => this.toggleFolder(row.path, cx))
-              .child(
-                svg(
-                  row.isExpanded
-                    ? "mods/git-graph/icons/chevron-down.svg"
-                    : "mods/git-graph/icons/chevron-right.svg"
-                )
-                  .size(11)
-                  .flex_none()
-                  .text_color(color(t.dim))
-              )
-              .child(svg("mods/git-graph/icons/folder.svg").size(13).flex_none().text_color(color(t.muted)))
-              .child(
-                div()
-                  .flex_1()
-                  .min_w(0)
-                  .truncate()
-                  .text_size(11)
-                  .font_medium()
-                  .text_color(color(t.foreground))
-                  .child(row.name)
-              )
-              .when(row.add > 0, (e) =>
-                e.child(div().text_size(10).text_color(color(t.ansi2)).child(`+${row.add}`))
-              )
-              .when(row.del > 0, (e) =>
-                e.child(div().text_size(10).text_color(color(t.ansi1)).child(`−${row.del}`))
-              );
-          }
-
-          const isFileSelected = this.selectedFile === row.path;
-          const sColor = color(getStatusColor(row.status, t));
-
-          return h_flex()
-            .id(`file-${row.path}`)
-            .h(24)
-            .flex_none()
-            .pl(6 + row.depth * 14 + 14)
-            .pr(6)
-            .gap(6)
-            .items_center()
-            .rounded(4)
-            .cursor_pointer()
-            .when(isFileSelected, (e) => e.bg(color(t.selected)))
-            .hover((s) => s.bg(color(isFileSelected ? t.selected : t.hover)))
-            .tooltip("Open this diff in a new tab")
-            .on_click((_e, cx) => this.openDiffTab(row.path, cx))
-            .child(
-              div()
-                .w(14)
-                .flex_none()
-                .text_center()
-                .font_semibold()
-                .text_size(10)
-                .text_color(sColor)
-                .child(row.status || "M")
-            )
-            .child(
-              div()
-                .flex_1()
-                .min_w(0)
-                .truncate()
-                .text_size(11)
-                .text_color(color(isFileSelected ? t.foreground : t.dim))
-                .child(row.name)
-            )
-            .when(row.add > 0, (e) =>
-              e.child(div().text_size(10).text_color(color(t.ansi2)).child(`+${row.add}`))
-            )
-            .when(row.del > 0, (e) =>
-              e.child(div().text_size(10).text_color(color(t.ansi1)).child(`−${row.del}`))
-            );
-        })
+              .justify_center()
+              .bg(color(t.border))
+              .text_size(9)
+              .font_medium()
+              .text_color(color(t.muted))
+              .child(String(count))
+          )
+      )
+      .child(
+        rows.length
+          ? v_flex()
+              .id("tree-file-rows")
+              .flex_1()
+              .min_h(0)
+              .overflow_y_scrollbar()
+              .py(3)
+              .children(rows.map((row) => this.renderTreeRow(row, t, cx)))
+          : div()
+              .flex_1()
+              .p(12)
+              .text_size(11)
+              .text_color(color(t.dim))
+              .child("No changed files in this commit")
       );
+  }
+
+  /** Commit table plus its load-more bar, shared by both detail layouts. */
+  renderCommitArea(t, isCompact, cx) {
+    const visibleItems = this.getVisibleItems();
+    return v_flex()
+      .id("commits-container")
+      .relative()
+      .flex_1()
+      .min_h(0)
+      .on_mouse_down("left", (e, _cx) => {
+        this.lastLeftClickEvent = e;
+        this.lastListLeftClickEvent = e;
+      })
+      .on_mouse_down("right", (e, _cx) => {
+        this.lastRightClickEvent = e;
+      })
+      // Empty or Error states
+      .when(Boolean(this.error), (e) =>
+        e.child(
+          v_flex()
+            .p(30)
+            .gap(12)
+            .items_center()
+            .justify_center()
+            .child(div().text_size(13).text_color(color(t.dim)).child(this.error || ""))
+            .child(
+              h_flex()
+                .id("open-folder-btn")
+                .gap(6)
+                .items_center()
+                .px(12)
+                .py(5)
+                .rounded(6)
+                .bg(color(t.solid))
+                .text_color(color(t.solid_foreground))
+                .text_size(12)
+                .cursor_pointer()
+                .on_click((_e, cx) => this.openFolder(cx))
+                .child(svg("mods/git-graph/icons/folder.svg").size(14))
+                .child("Open Repository Folder…")
+            )
+        )
+      )
+      .when(!this.loading && !this.error && !visibleItems.length, (e) =>
+        e.child(
+          v_flex()
+            .p(30)
+            .gap(10)
+            .items_center()
+            .justify_center()
+            .child(
+              div()
+                .text_color(color(t.dim))
+                .text_size(13)
+                .child(
+                  !this.hasHead
+                    ? "No commits yet in this repository"
+                    : this.searchQuery
+                    ? "No commits match your filter"
+                    : "No commits found on this branch"
+                )
+            )
+            .when(!this.hasHead, (el) =>
+              el.child(
+                div()
+                  .text_size(11)
+                  .text_color(color(t.muted))
+                  .child(`Current branch is '${this.currentBranch}'. Make your first commit to see the graph.`)
+              )
+            )
+        )
+      )
+      // Virtual list when items exist
+      .when(visibleItems.length > 0, (e) =>
+        e
+          .child(
+            uniform_list(
+              "commits-virtual-list",
+              visibleItems.length,
+              (i) => (visibleItems[i]?.isWorkingTree ? "__WORKING_TREE__" : visibleItems[i]?.hash || String(i)),
+              (range, cx) => {
+                const slice = visibleItems.slice(range.start, range.end);
+                return slice.map((item) => {
+                  if (item.isWorkingTree) {
+                    return this.renderWorkingTreeRow(item, t, isCompact, cx);
+                  }
+                  return this.renderCommitRow(item, t, isCompact, cx);
+                });
+              }
+            )
+              .size_full()
+              .on_item_click((key, cx) => {
+                const event = this.lastListLeftClickEvent || this.lastLeftClickEvent;
+                if (key === "__WORKING_TREE__") {
+                  this.selectWorkingTree(cx);
+                } else {
+                  const item = this.commits.find((c) => c.hash === key);
+                  if (item) {
+                    const clickX = event?.local_position?.x;
+                    if (typeof clickX === "number" && item._badgeBoxes) {
+                      const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
+                      if (hit) {
+                        if (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch") {
+                          if (this.branchFilter === hit.ref.text) {
+                            this.setBranchFilter("all", cx);
+                          } else {
+                            this.setBranchFilter(hit.ref.text, cx);
+                          }
+                          return;
+                        }
+                        if (hit.ref.kind === "tag") {
+                          this.setSearch(hit.ref.text, cx);
+                          return;
+                        }
+                      }
+                    }
+                    this.selectCommit(item, cx);
+                  }
+                }
+              })
+              .on_item_secondary_click((key, event, cx) => {
+                if (key !== "__WORKING_TREE__") {
+                  const item = this.commits.find((c) => c.hash === key);
+                  if (item) {
+                    const clickX = event?.local_position?.x;
+                    if (typeof clickX === "number" && item._badgeBoxes) {
+                      const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
+                      if (hit && (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch")) {
+                        this.openBranchContextMenu(hit.ref, event, cx);
+                        return;
+                      }
+                    }
+                    this.openCommitContextMenu(item, event, cx);
+                  }
+                }
+              })
+          )
+          .child(Scrollbar.vertical("commits-virtual-list").absolute().inset_0())
+      )
+      // Load more bar if at commit limit
+      .when(this.commits.length >= this.commitLimit, (e) =>
+        e.child(
+          h_flex()
+            .id("load-more-btn")
+            .h(28)
+            .flex_none()
+            .justify_center()
+            .items_center()
+            .bg(color(t.raised))
+            .border_t(1)
+            .border_color(color(t.border))
+            .cursor_pointer()
+            .hover((s) => s.bg(color(t.hover)))
+            .on_click((_e, cx) => this.loadMoreCommits(cx))
+            .child(
+              div()
+                .text_size(11)
+                .text_color(color(t.accent))
+                .child(`Showing ${this.commits.length} commits · Load 500 more…`)
+            )
+        )
+      );
+  }
+
+  /**
+   * Pixel height for a wrapped commit message: grows with its line count and
+   * stops at a readable cap, where the body becomes scrollable.
+   */
+  commitMessageHeight(message, isCompact) {
+    const text = String(message || "");
+    const width = Math.max(160, this.width - 24);
+    // 11px UI text averages ~6.2px per glyph; keep room for the scrollbar.
+    const charsPerLine = Math.max(20, Math.floor((width - 20) / 6.2));
+    const lines = text
+      .split("\n")
+      .reduce((total, line) => total + Math.max(1, Math.ceil(line.length / charsPerLine)), 0);
+    const natural = lines * 16 + 16;
+    return Math.max(32, Math.min(natural, isCompact ? 150 : 200));
   }
 
   renderDetailsPanel(t, isCompact, cx) {
@@ -2596,8 +3027,8 @@ export default class GitGraph extends View {
 
     return v_flex()
       .id("commit-details-panel")
-      .flex_none()
-      .h(isCompact ? 340 : 300)
+      .size_full()
+      .min_h(0)
       .border_t(1)
       .border_color(color(t.border))
       .bg(color(t.background))
@@ -2675,9 +3106,10 @@ export default class GitGraph extends View {
           .child(
             div()
               .flex_none()
-              .max_h(52)
+              .h(this.commitMessageHeight(fullMsg, isCompact))
               .p(8)
               .overflow_y_scrollbar()
+              .whitespace_normal()
               .border_b(1)
               .border_color(color(t.border))
               .text_size(11)
@@ -3855,7 +4287,6 @@ export default class GitGraph extends View {
     const showWorkingTree = this.shouldShowWorkingTree();
     const laneWidth = 16;
     const graphWidth = Math.max(64, (this.maxLane + 1) * laneWidth + 24);
-    const visibleItems = this.getVisibleItems();
     const count = this.commits.length;
 
     let branchLabel = "All branches";
@@ -4136,169 +4567,23 @@ export default class GitGraph extends View {
           .when(!isCompact, (e) => e.child(div().w(130).flex_none().truncate().child("Author")))
           .when(!isCompact, (e) => e.child(div().w(70).flex_none().text_center().child("Commit")))
       )
-      // Virtualized Commit List with uniform_list
-      .child(
-        v_flex()
-          .id("commits-container")
-          .relative()
-          .flex_1()
-          .min_h(0)
-          .on_mouse_down("left", (e, _cx) => {
-            this.lastLeftClickEvent = e;
-            this.lastListLeftClickEvent = e;
-          })
-          .on_mouse_down("right", (e, _cx) => {
-            this.lastRightClickEvent = e;
-          })
-          // Empty or Error states
-          .when(Boolean(this.error), (e) =>
-            e.child(
-              v_flex()
-                .p(30)
-                .gap(12)
-                .items_center()
-                .justify_center()
-                .child(div().text_size(13).text_color(color(t.dim)).child(this.error || ""))
-                .child(
-                  h_flex()
-                    .id("open-folder-btn")
-                    .gap(6)
-                    .items_center()
-                    .px(12)
-                    .py(5)
-                    .rounded(6)
-                    .bg(color(t.solid))
-                    .text_color(color(t.solid_foreground))
-                    .text_size(12)
-                    .cursor_pointer()
-                    .on_click((_e, cx) => this.openFolder(cx))
-                    .child(svg("mods/git-graph/icons/folder.svg").size(14))
-                    .child("Open Repository Folder…")
-                )
+      // Commit list + resizable details pane. The native group owns the drag
+      // handle, so the bottom pane keeps its size across repaints.
+      .when(Boolean(this.selectedCommit), (e) =>
+        e.child(
+          v_resizable("git-graph-split")
+            .flex_1()
+            .min_h(0)
+            .child(resizable_panel().child(this.renderCommitArea(t, isCompact, cx)))
+            .child(
+              resizable_panel()
+                .size(isCompact ? 340 : 300)
+                .size_range(140, 700)
+                .child(this.renderDetailsPanel(t, isCompact, cx))
             )
-          )
-          .when(!this.loading && !this.error && !visibleItems.length, (e) =>
-            e.child(
-              v_flex()
-                .p(30)
-                .gap(10)
-                .items_center()
-                .justify_center()
-                .child(
-                  div()
-                    .text_color(color(t.dim))
-                    .text_size(13)
-                    .child(
-                      !this.hasHead
-                        ? "No commits yet in this repository"
-                        : this.searchQuery
-                        ? "No commits match your filter"
-                        : "No commits found on this branch"
-                    )
-                )
-                .when(!this.hasHead, (el) =>
-                  el.child(
-                    div()
-                      .text_size(11)
-                      .text_color(color(t.muted))
-                      .child(`Current branch is '${this.currentBranch}'. Make your first commit to see the graph.`)
-                  )
-                )
-            )
-          )
-          // Virtual list when items exist
-          .when(visibleItems.length > 0, (e) =>
-            e
-              .child(
-                uniform_list(
-                  "commits-virtual-list",
-                  visibleItems.length,
-                  (i) => (visibleItems[i]?.isWorkingTree ? "__WORKING_TREE__" : visibleItems[i]?.hash || String(i)),
-                  (range, cx) => {
-                    const slice = visibleItems.slice(range.start, range.end);
-                    return slice.map((item) => {
-                      if (item.isWorkingTree) {
-                        return this.renderWorkingTreeRow(item, t, isCompact, cx);
-                      }
-                      return this.renderCommitRow(item, t, isCompact, cx);
-                    });
-                  }
-                )
-                  .size_full()
-                  .on_item_click((key, cx) => {
-                    const event = this.lastListLeftClickEvent || this.lastLeftClickEvent;
-                    if (key === "__WORKING_TREE__") {
-                      this.selectWorkingTree(cx);
-                    } else {
-                      const item = this.commits.find((c) => c.hash === key);
-                      if (item) {
-                        const clickX = event?.local_position?.x;
-                        if (typeof clickX === "number" && item._badgeBoxes) {
-                          const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
-                          if (hit) {
-                            if (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch") {
-                              if (this.branchFilter === hit.ref.text) {
-                                this.setBranchFilter("all", cx);
-                              } else {
-                                this.setBranchFilter(hit.ref.text, cx);
-                              }
-                              return;
-                            }
-                            if (hit.ref.kind === "tag") {
-                              this.setSearch(hit.ref.text, cx);
-                              return;
-                            }
-                          }
-                        }
-                        this.selectCommit(item, cx);
-                      }
-                    }
-                  })
-                  .on_item_secondary_click((key, event, cx) => {
-                    if (key !== "__WORKING_TREE__") {
-                      const item = this.commits.find((c) => c.hash === key);
-                      if (item) {
-                        const clickX = event?.local_position?.x;
-                        if (typeof clickX === "number" && item._badgeBoxes) {
-                          const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
-                          if (hit && (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch")) {
-                            this.openBranchContextMenu(hit.ref, event, cx);
-                            return;
-                          }
-                        }
-                        this.openCommitContextMenu(item, event, cx);
-                      }
-                    }
-                  })
-              )
-              .child(Scrollbar.vertical("commits-virtual-list").absolute().inset_0())
-          )
-          // Load more bar if at commit limit
-          .when(this.commits.length >= this.commitLimit, (e) =>
-            e.child(
-              h_flex()
-                .id("load-more-btn")
-                .h(28)
-                .flex_none()
-                .justify_center()
-                .items_center()
-                .bg(color(t.raised))
-                .border_t(1)
-                .border_color(color(t.border))
-                .cursor_pointer()
-                .hover((s) => s.bg(color(t.hover)))
-                .on_click((_e, cx) => this.loadMoreCommits(cx))
-                .child(
-                  div()
-                    .text_size(11)
-                    .text_color(color(t.accent))
-                    .child(`Showing ${this.commits.length} commits · Load 500 more…`)
-                )
-            )
-          )
+        )
       )
-      // Bottom Details Panel (Tree View & Diff View)
-      .when(Boolean(this.selectedCommit), (e) => e.child(this.renderDetailsPanel(t, isCompact, cx)))
+      .when(!this.selectedCommit, (e) => e.child(this.renderCommitArea(t, isCompact, cx)))
       // Overlays painted last in painter's algorithm order (no invalid z_index)
       .when(this.branchDropdownOpen, (e) => e.child(this.renderBranchDropdown(t, cx)))
       .when(Boolean(this.contextMenu), (e) => e.child(this.renderContextMenu(t, cx)))

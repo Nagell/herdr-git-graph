@@ -42,11 +42,14 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Real-time detection of dirty working trees via `git status` and diff statistics.
   - Dedicated top "Working Tree" row displaying uncommitted changes with `+add` / `−del` counters.
   - Full inspection of modified, added, deleted, and untracked files, each diff opening in its own tab.
-- **Hierarchical Changed Files Tree View**:
-  - Organizes changed files into an expandable/collapsible folder tree with chevron toggles.
-  - Folders containing changes are expanded by default.
-  - Status badges with distinct theme colors: Added (green/`ansi2`), Deleted (red/`ansi1`), Modified (blue/`ansi4`), Untracked (yellow/`ansi3`).
-  - Aggregated line change counts (`+add` / `−del`) on directories and files.
+- **VS Code-Style Changed Files Tree**:
+  - A fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder.
+  - Nested folders with indentation guide lines and chevrons; no folder icons, matching VS Code's Source Control view.
+  - Colored language badges per file (`JS`, `TS`, `#` for CSS, `{}` for JSON, `<>` for HTML, …) with the generic file icon as fallback.
+  - Porcelain status letters on the right: Added (green/`ansi2`), Deleted (red/`ansi1`), Modified (blue/`ansi4`), Conflict (yellow/`ansi3`).
+  - Colored per-file `+added` / `−deleted` counts beside the status letter (green/red); untracked files also show `+N` by counting their lines. The hover tooltip keeps the full path and status label.
+  - The details pane below the graph is resizable: drag the divider to change how much of the panel belongs to the commit list and how much to the changed-file tree.
+  - The commit message wraps and expands with its content up to a readable cap, then scrolls, so the description is never clipped.
 - **Full-Size Diff Tabs**:
   - Clicking a file in the changed-files tree opens its diff in a dedicated Herdr tab (`Diff · <file>`): a virtualized editor with old/new line gutters, green/red change backgrounds, styled hunk headers, and horizontal scrolling for long lines.
   - Three layouts, switchable from the tab toolbar and remembered across tabs: **Inline** (unified), **Split** (old and new side by side), and **Stacked** (old above new). Both split panes share one vertical scroll position and keep their own horizontal scrollbar.

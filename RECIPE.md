@@ -20,7 +20,7 @@ Inside any Herdr split pane, dedicated tab, or sidebar panel, you see a full vis
 - **In-Progress Banner**: Displays an alert banner during ongoing merges, rebases, cherry-picks, or reverts with one-click Continue and Abort buttons.
 - **Details & Diff Tabs**:
   - **Header**: Selected commit subject, full commit hash with one-click Copy SHA button, author email, relative date, and close button.
-  - **Hierarchical File Tree**: Changed files organized by directory with chevron expand/collapse toggles, file status badges (`M`, `A`, `D`, `U`), and line addition/deletion counts.
+  - **Changes Tree**: VS Code-style fixed **Changes** header with a count badge and collapse-all chevron, indentation guide lines, folder chevrons, colored language badges, right-aligned status letters (`M`, `A`, `D`, `U`), and colored per-file `+added` / `−deleted` counts (green/red). Untracked files get `+N` from their line count.
   - **Diff Tab**: Clicking a file opens its diff full size in a `Diff · <file>` tab with old/new line gutters, colored additions and deletions, hunk headers, horizontal scrolling, and character-level intra-line highlights. Toolbar buttons switch between **Inline**, **Split** (side by side), and **Stacked** (old above new); the choice is remembered, and both split panes scroll together vertically. Working-tree diffs refresh automatically.
   - **Compact Mode**: The details panel shows the file tree full width when the container is below 560px, and `panel: true` renders the graph as a Files-style card with the compact toolbar.
 - **Commit Context Menu & Modals**:
