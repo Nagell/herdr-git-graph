@@ -65,9 +65,118 @@ const NETWORK = [
 ];
 
 // Background tree-cleanup agent. OpenCode's "mini" interface keeps the session
-// watchable and steerable; the low variant keeps the run cheap.
-const CLEAN_AGENT_MODEL = "opencode-go/deepseek-v4.1-flash#low";
-const CLEAN_AGENT_LABEL = "OpenCode Mini";
+// watchable and steerable. Free models are always preferred; the stored choice
+// is only used when it is still present in `opencode models`.
+const CLEAN_AGENT_MODEL_PREFERENCE = [
+  "opencode/deepseek-v4.1-flash-free#low",
+  "opencode/glm-5.3-flash-free#low",
+  "opencode/mimo-v2.6-flash-free",
+  "opencode/pulse-alpha-free#low",
+  "opencode/flint-40b-free#low",
+  "opencode/beam-free#low",
+  "opencode/crouton-alpha-free#low",
+  "opencode/nemotron-3.5-lightning-free",
+  "opencode-go/beam-free#low",
+  "opencode-go/iceman-contributor-free",
+  "opencode/big-pickle",
+];
+const CLEAN_AGENT_MODEL = CLEAN_AGENT_MODEL_PREFERENCE[0];
+const CLEAN_AGENT_MODEL_KEY = "git-graph.cleanAgentModel";
+const CLEAN_AGENT_LABEL = "AI commit worker";
+// When no curated preference matches, free models from these families are
+// listed first: they are the strongest at code edits and commit slicing.
+const CLEAN_AGENT_FAMILY_RANK = [
+  "deepseek",
+  "glm",
+  "qwen",
+  "kimi",
+  "mimo",
+  "minimax",
+  "mistral",
+  "gemma",
+  "nemotron",
+  "flint",
+  "beam",
+  "pulse",
+  "crouton",
+  "iceman",
+  "big-pickle",
+];
+
+/** Lower is better; unknown families come last. */
+function cleanModelRank(id) {
+  const name = String(id || "").split("/").pop() || "";
+  const idx = CLEAN_AGENT_FAMILY_RANK.findIndex((family) => name.includes(family));
+  return idx < 0 ? CLEAN_AGENT_FAMILY_RANK.length : idx;
+}
+
+// Provider tabs in the model picker. Icons are copied into this mod so the
+// picker keeps them when published; unknown providers get the generic icon.
+const CLEAN_PROVIDER_ORDER = ["opencode", "opencode-go", "github-copilot", "google", "deepseek"];
+const CLEAN_PROVIDER_ICONS = {
+  opencode: "mods/git-graph/icons/opencode.svg",
+  "opencode-go": "mods/git-graph/icons/opencode.svg",
+  "github-copilot": "mods/git-graph/icons/copilot.svg",
+  google: "mods/git-graph/icons/gemini.svg",
+  deepseek: "mods/git-graph/icons/deepseek.svg",
+};
+const CLEAN_PROVIDER_NAMES = {
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
+  "github-copilot": "Copilot",
+  google: "Google",
+  deepseek: "DeepSeek",
+};
+
+/** A short, human-readable provider name. */
+function cleanProviderName(id) {
+  const key = String(id || "other");
+  if (CLEAN_PROVIDER_NAMES[key]) return CLEAN_PROVIDER_NAMES[key];
+  return key
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+/** The icon for a provider, with a generic fallback. */
+function cleanProviderIcon(id) {
+  return CLEAN_PROVIDER_ICONS[String(id || "")] || "mods/git-graph/icons/provider.svg";
+}
+
+/** True for a model the OpenCode catalog offers without charge. */
+function isFreeModel(id) {
+  const base = String(id || "").split("#")[0];
+  return /(?:^|[/-])free(?:$|[/-])/.test(base) || base === "opencode/big-pickle";
+}
+
+/** A readable label for a `provider/model#variant` id. */
+function cleanModelLabel(id) {
+  const base = String(id || "").split("#")[0];
+  const name = base.split("/").pop() || base;
+  const special = {
+    claude: "Claude",
+    crouton: "Crouton",
+    deepseek: "DeepSeek",
+    flint: "Flint",
+    gemini: "Gemini",
+    glm: "GLM",
+    gpt: "GPT",
+    iceman: "Iceman",
+    kimi: "Kimi",
+    llama: "Llama",
+    mimo: "MiMo",
+    nemotron: "Nemotron",
+    pulse: "Pulse",
+    qwen: "Qwen",
+    sonnet: "Sonnet",
+  };
+  return name
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => special[word.toLowerCase()] || (word.length <= 3 ? word.toUpperCase() : word[0].toUpperCase() + word.slice(1)))
+    .join(" ");
+}
 
 /** @param {any} c @returns {`#${string}`} */
 const color = (c) => /** @type {`#${string}`} */ (c);
@@ -337,9 +446,12 @@ export default class GitGraph extends View {
     this.detached = false;
     this.remoteAction = null; // "fetch" | "pull" | "push" while one is running
 
-    // Background OpenCode session that cleans the working tree.
-    this.treeAgent = null; // { address, name } once hc run returns
+    // Background AI commit worker. The terminal it runs in is closed as soon
+    // as its commits land and the tree is clean.
+    this.treeAgent = null; // { address, name, sessionId, headBefore, ... }
     this.treeAgentStarting = false;
+    this.treeAgentModel = null; // last resolved model id
+    this.cleanModelsCache = null; // { at, root, on, models } from `opencode models`
 
     this.handle = cx.focus_handle();
 
@@ -1501,6 +1613,12 @@ export default class GitGraph extends View {
           this.openModal("tag", this.commits[0], cx);
         } else if (preview === "modal-reset" && this.commits.length > 0) {
           this.openModal("reset", this.commits[0], cx);
+        } else if (preview === "modal-clean-model") {
+          this.openCleanAgentModelPicker(
+            cx,
+            null,
+            typeof p?.previewProvider === "string" ? p.previewProvider : null
+          );
         } else if ((preview === "confirm-merge" || preview === "modal-confirm") && this.commits.length > 0) {
           this.openModal("confirm-merge", this.commits[0], cx);
         } else if (preview === "file-diff" && this.workingTreeFiles.length > 0) {
@@ -2054,6 +2172,29 @@ export default class GitGraph extends View {
     const root = this.root;
     const on = this.on;
     const branchName = this.currentBranch;
+
+    // Choosing a model is a local preference change, not a git mutation.
+    if (type === "clean-model") {
+      const chosen = dialog.selected;
+      if (!chosen) {
+        dialog.error = "Choose a model first";
+        cx.notify();
+        return;
+      }
+      setShared(CLEAN_AGENT_MODEL_KEY, chosen);
+      this.treeAgentModel = chosen;
+      this.closeModal(cx);
+      if (this.workingTreeFiles.length || this.inProgressOp) {
+        this.startTreeAgent(cx, chosen);
+      } else {
+        notify({
+          title: "AI model saved",
+          body: `${cleanModelLabel(chosen)} will clean the next dirty tree.`,
+          level: "success",
+        });
+      }
+      return;
+    }
 
     // The handler's Context is valid only until it returns, so the name is
     // read and checked synchronously; everything after the first await runs
@@ -3864,12 +4005,14 @@ export default class GitGraph extends View {
                   )
               )
           )
+          // Background AI commit worker
           .when(Boolean(this.workingTreeFiles.length || this.inProgressOp || this.treeAgentBusy()), (e) =>
             e
-              .child(div().h(1).bg(color(t.border)).my(3))
+              .child(div().flex_none().h(1).bg(color(t.border)).my(3))
               .child(
                 h_flex()
                   .id("branch-clean-agent")
+                  .flex_none()
                   .h(26)
                   .px(8)
                   .gap(6)
@@ -3886,14 +4029,35 @@ export default class GitGraph extends View {
                     }
                     this.startTreeAgent(cx);
                   })
-                  .child(svg("icons/opencode.svg").size(12).text_color(color(t.accent)))
+                  .child(svg("mods/git-graph/icons/sparkles.svg").size(12).text_color(color(t.accent)))
                   .child(div().flex_1().truncate().child(`Clean tree with ${CLEAN_AGENT_LABEL}`))
                   .child(
                     div()
-                      .text_size(10)
+                      .max_w(120)
+                      .truncate()
+                      .text_size(9)
                       .text_color(color(t.muted))
-                      .child(this.treeAgentBusy() ? "working · peek" : "low · no push")
+                      .child(this.treeAgentBusy() ? "working · peek" : cleanModelLabel(this.cleanAgentModelLabel()))
                   )
+              )
+              .child(
+                h_flex()
+                  .id("branch-clean-model")
+                  .flex_none()
+                  .h(24)
+                  .px(8)
+                  .gap(6)
+                  .items_center()
+                  .rounded(5)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(color(t.hover)))
+                  .on_click((_e, cx) => {
+                    this.branchDropdownOpen = false;
+                    this.openCleanAgentModelPicker(cx);
+                  })
+                  .child(svg("mods/git-graph/icons/sparkles.svg").size(10).text_color(color(t.dim)))
+                  .child(div().flex_1().truncate().text_size(10).text_color(color(t.muted)).child("AI commit model"))
+                  .child(div().text_size(9).text_color(color(t.accent)).child("Change"))
               )
           )
       );
@@ -3963,7 +4127,7 @@ export default class GitGraph extends View {
       .child(svg(icon).size(12).text_color(color(running ? t.accent : t.dim)));
   }
 
-  /** Live status of the background cleanup agent, or null when it is idle/gone. */
+  /** Live status of the background AI worker, or null when it is idle/gone. */
   treeAgentStatus() {
     if (!this.treeAgent?.address) return null;
     const term = terminals().find((t) => t.address === this.treeAgent.address);
@@ -3971,24 +4135,247 @@ export default class GitGraph extends View {
     return term.status || null;
   }
 
-  /** True while the launched cleanup agent still owns the working tree. */
+  /** True while the launched AI worker still owns the working tree. */
   treeAgentBusy() {
     if (this.treeAgentStarting) return true;
     const agent = this.treeAgent;
-    if (!agent?.address) return false;
-    if (agent.busy === false) return false;
-    if (agent.busy === true) {
-      const term = terminals().find((t) => t.address === agent.address);
-      if (!term || term.state !== "live") {
-        if (Date.now() - (agent.startedAt || 0) > 15000) return false;
-      }
-      return true;
+    if (!agent || agent.finished) return false;
+    // Once `hc run` returns, the worker keeps the button locked until its
+    // session is done and the tree is clean (or its terminal is gone and the
+    // finish check retires it).
+    return true;
+  }
+
+  /** The model the next run will use (explicit choice, else the free default). */
+  cleanAgentModelLabel() {
+    return this.treeAgentModel || shared(CLEAN_AGENT_MODEL_KEY) || CLEAN_AGENT_MODEL;
+  }
+
+  /**
+   * Every model `opencode models` reports, with free ones first. When the
+   * catalog cannot be read, the known free preference still gives the picker
+   * something useful to show.
+   */
+  async loadCleanAgentModels(root, on, options = {}) {
+    const cache = this.cleanModelsCache;
+    if (
+      !options.force &&
+      cache &&
+      cache.root === root &&
+      cache.on === on &&
+      Date.now() - cache.at < 60000
+    ) {
+      return cache.models;
     }
-    const status = this.treeAgentStatus();
-    if (status === "working" || status === "blocked") return true;
-    // `hc run` returns before the session shows up. Keep the button locked
-    // briefly so a second click cannot start a duplicate agent.
-    return Date.now() - (agent.startedAt || 0) < 30000;
+    let ids = [];
+    try {
+      const r = await exec("opencode", ["models"], { cwd: root, on });
+      if (r.code === 0) {
+        ids = r.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
+      }
+    } catch {
+      // Fall through to the known free list.
+    }
+    if (!ids.length) ids = CLEAN_AGENT_MODEL_PREFERENCE.map((id) => id.split("#")[0]);
+    const models = ids
+      .filter((id) => /^[^\s/]+\/[^\s]+$/.test(id))
+      .map((id) => ({
+        id,
+        provider: id.split("/")[0],
+        label: cleanModelLabel(id),
+        free: isFreeModel(id),
+      }))
+      .sort(
+        (a, b) =>
+          Number(b.free) - Number(a.free) ||
+          (a.free && b.free ? cleanModelRank(a.id) - cleanModelRank(b.id) : 0) ||
+          a.id.localeCompare(b.id)
+      );
+    this.cleanModelsCache = { at: Date.now(), root, on, models };
+    return models;
+  }
+
+  /**
+   * Resolve a model id: an explicit choice wins, a saved choice is used while
+   * it exists, then the free preference list, then any free model. A paid
+   * model is only ever used when the person chose it explicitly.
+   */
+  resolveCleanAgentModel(models, override = null) {
+    const baseOf = (id) => String(id || "").split("#")[0];
+    const has = (id) => Boolean(id) && models.some((m) => m.id === baseOf(id));
+    if (override && has(override)) return override;
+    const saved = shared(CLEAN_AGENT_MODEL_KEY);
+    if (has(saved)) return saved;
+    for (const candidate of CLEAN_AGENT_MODEL_PREFERENCE) {
+      if (has(candidate)) return candidate;
+    }
+    const free = models.find((m) => m.free);
+    return free ? free.id : null;
+  }
+
+  /** Models from the selected provider tab, or everything on the All tab. */
+  cleanProviderPool(dialog) {
+    const models = dialog.models || [];
+    return dialog.provider ? models.filter((m) => m.provider === dialog.provider) : models;
+  }
+
+  /** What the picker shows: provider tab + search, then free-only or all. */
+  cleanVisibleModels(dialog) {
+    const pool = this.cleanProviderPool(dialog);
+    const query = String(dialog.search || "").trim().toLowerCase();
+    if (query) {
+      return pool.filter(
+        (m) => m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
+      );
+    }
+    return dialog.showAll ? pool : pool.filter((m) => m.free);
+  }
+
+  /** Provider tabs with their icons, like a compact browser tab strip. */
+  cleanProviderTabs(dialog, t, cx) {
+    const groups = new Map();
+    for (const model of dialog.models || []) {
+      const id = model.provider || "other";
+      const group = groups.get(id) || {
+        id,
+        name: cleanProviderName(id),
+        icon: cleanProviderIcon(id),
+        count: 0,
+        free: 0,
+      };
+      group.count += 1;
+      if (model.free) group.free += 1;
+      groups.set(id, group);
+    }
+    const providers = [...groups.values()].sort((a, b) => {
+      const ai = CLEAN_PROVIDER_ORDER.indexOf(a.id);
+      const bi = CLEAN_PROVIDER_ORDER.indexOf(b.id);
+      return (
+        (ai < 0 ? CLEAN_PROVIDER_ORDER.length : ai) -
+          (bi < 0 ? CLEAN_PROVIDER_ORDER.length : bi) || a.id.localeCompare(b.id)
+      );
+    });
+
+    const allModels = dialog.models || [];
+    const tab = (id, name, icon, count, free) => {
+      const active = (dialog.provider || null) === id;
+      const tip = `${name} · ${count} model${count === 1 ? "" : "s"}${
+        free > 0 ? ` · ${free} free` : ""
+      }`;
+      return h_flex()
+        .id(id ? `model-provider-${id}` : "model-provider-all")
+        .flex_none()
+        .h(25)
+        .px(7)
+        .gap(5)
+        .items_center()
+        .rounded(5)
+        .border_1()
+        .border_color(color(active ? t.accent + "66" : t.border))
+        .bg(color(active ? t.selected : t.background))
+        .cursor_pointer()
+        .hover((s) => s.bg(color(t.hover)))
+        .tooltip(tip)
+        .on_click((_e, cx) => {
+          dialog.provider = id;
+          const pool = this.cleanProviderPool(dialog);
+          if (id && !pool.some((m) => m.free)) dialog.showAll = true;
+          const visible = this.cleanVisibleModels(dialog);
+          if (!visible.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
+            dialog.selected = visible[0]?.id || null;
+          }
+          cx.notify();
+        })
+        .child(svg(icon).size(11).text_color(color(active ? t.accent : t.dim)))
+        .child(div().text_size(10).text_color(color(active ? t.accent : t.muted)).child(name));
+    };
+
+    return h_flex()
+      .id("model-provider-tabs")
+      .flex_none()
+      .flex_wrap()
+      .gap(4)
+      .child(
+        tab(
+          null,
+          "All",
+          "mods/git-graph/icons/sparkles.svg",
+          allModels.length,
+          allModels.filter((m) => m.free).length
+        )
+      )
+      .children(providers.map((p) => tab(p.id, p.name, p.icon, p.count, p.free)));
+  }
+
+  /**
+   * Opens a model picker for the AI worker. It is used both as an explicit
+   * choice (right-click the toolbar button or the branch-menu entry) and as
+   * the recovery path when the preferred model cannot start.
+   */
+  openCleanAgentModelPicker(cx, error = null, provider = null) {
+    this.closeContextMenu();
+    const location = this.getLocation();
+    const root = this.root || location.cwd;
+    const on = this.on ?? location.on;
+    const searchInput = InputState.new({ placeholder: "Search models…" });
+    const dialog = {
+      type: "clean-model",
+      models: [],
+      selected: null,
+      search: "",
+      searchInput,
+      provider,
+      showAll: false,
+      loading: true,
+      error,
+    };
+    this.modalDialog = dialog;
+    this.modalInput = searchInput;
+    this.modalTagMessageInput = null;
+    searchInput.on("change", (_e, cx) => {
+      if (this.modalDialog !== dialog) return;
+      const query = searchInput.value().trim();
+      dialog.search = query;
+      if (query) {
+        const lower = query.toLowerCase();
+        const matches = this.cleanProviderPool(dialog).filter(
+          (m) => m.id.toLowerCase().includes(lower) || m.label.toLowerCase().includes(lower)
+        );
+        if (!matches.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
+          dialog.selected = matches[0]?.id || null;
+        }
+      } else {
+        const visible = this.cleanVisibleModels(dialog);
+        if (!visible.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
+          dialog.selected = visible[0]?.id || null;
+        }
+      }
+      cx.notify();
+    });
+    searchInput.on("submit", (_e, cx) => this.submitModal(cx));
+    this.focusModalInput(cx);
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      const models = await this.loadCleanAgentModels(root, on, { force: true });
+      if (this.modalDialog !== dialog) return;
+      dialog.models = models;
+      const pool = this.cleanProviderPool(dialog);
+      const freeModels = pool.filter((m) => m.free);
+      dialog.showAll = freeModels.length === 0;
+      const resolved = this.resolveCleanAgentModel(pool, shared(CLEAN_AGENT_MODEL_KEY));
+      const visible = this.cleanVisibleModels(dialog);
+      const resolvedBase = String(resolved || "").split("#")[0];
+      dialog.selected = visible.some((m) => m.id === resolvedBase)
+        ? resolved
+        : visible[0]?.id || null;
+      dialog.loading = false;
+      if (!models.length) dialog.error = error || "No OpenCode models were found.";
+      cx.notify();
+    });
   }
 
   /** A session id the mini UI creates, so we can follow its busy state. */
@@ -3998,22 +4385,27 @@ export default class GitGraph extends View {
 
   /**
    * OpenCode Mini never reports OSC 7501 status, so poll its session. The
-   * session is idle once `time.idle` is at or after `time.busy`.
+   * session is idle once `time.idle` is at or after `time.busy`. When it
+   * settles, `checkTreeAgentFinished` decides whether the worker is done.
    */
   pollTreeAgent(cx) {
     const agent = this.treeAgent;
-    if (!agent?.sessionId || agent.busy === false || agent.polling) return;
+    if (!agent?.sessionId || agent.polling || agent.finished) return;
     const term = terminals().find((t) => t.address === agent.address);
-    if (Date.now() - (agent.startedAt || 0) > 15000 && (!term || term.state !== "live")) {
+    // A missing address means `hc run`'s JSON was unusable; follow the session
+    // instead of treating the worker as already gone.
+    const live = agent.address ? Boolean(term) && term.state === "live" : true;
+    const elapsed = Date.now() - (agent.startedAt || 0);
+
+    // `hc run` returns before the terminal shows up; give it a moment.
+    if (!live && !agent.found && elapsed < 15000) return;
+    if (!live || (!agent.found && elapsed > 30000)) {
       agent.busy = false;
-      cx.notify();
+      agent.idleSince = agent.idleSince || Date.now();
+      this.checkTreeAgentFinished(cx, agent);
       return;
     }
-    if (!agent.found && Date.now() - (agent.startedAt || 0) > 30000) {
-      agent.busy = false;
-      cx.notify();
-      return;
-    }
+
     agent.polling = true;
     cx.spawn(async (cx) => {
       try {
@@ -4026,17 +4418,129 @@ export default class GitGraph extends View {
         const session = payload?.data ?? payload;
         const time = session?.time ?? {};
         const started = time.busy || time.created;
-        const busy = Boolean(started) && (!time.idle || time.idle < started);
+        const failed = session?.outcome === "failed" || session?.outcome === "error";
+        const busy = !failed && Boolean(started) && (!time.idle || time.idle < started);
         if (this.treeAgent !== agent) return;
         agent.found = true;
+        if (failed) {
+          agent.failed = true;
+          agent.busy = false;
+          agent.idleSince = agent.idleSince || Date.now();
+        } else if (busy) {
+          agent.sawBusy = true;
+          agent.idleSince = null;
+        } else if (agent.busy !== false) {
+          agent.idleSince = Date.now();
+        }
         agent.busy = busy;
         cx.notify();
+        if (!busy) this.checkTreeAgentFinished(cx, agent);
       } catch {
         // The API may not be available; the terminal-status fallback applies.
       } finally {
         agent.polling = false;
       }
     });
+  }
+
+  /**
+   * The session went idle (or the terminal ended). A clean tree means the
+   * worker did its job: report the new commits and close its tab. A dirty
+   * tree with a dead terminal means it failed, so offer another model.
+   */
+  checkTreeAgentFinished(cx, agent) {
+    if (this.treeAgent !== agent || agent.finished || agent.checking) return;
+    const term = terminals().find((t) => t.address === agent.address);
+    const live = agent.address ? Boolean(term) && term.state === "live" : true;
+    const idleMs = Date.now() - (agent.idleSince || agent.startedAt || Date.now());
+    // The first poll can catch the session before its prompt starts. Only a
+    // session that has been busy, or an exited terminal, may finish the run.
+    const settled = live
+      ? agent.failed ||
+        (agent.busy === false && ((agent.sawBusy && idleMs >= 3000) || (!agent.sawBusy && idleMs >= 30000)))
+      : true;
+    if (!settled) return;
+    if (agent.lastCheckAt && Date.now() - agent.lastCheckAt < 5000) return;
+    agent.checking = true;
+    agent.lastCheckAt = Date.now();
+
+    cx.spawn(async (cx) => {
+      try {
+        const now = terminals().find((t) => t.address === agent.address);
+        if (now && now.state === "live" && agent.busy !== false) return;
+
+        const status = await exec(
+          "git",
+          [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"],
+          { cwd: agent.root, on: agent.on }
+        );
+        if (this.treeAgent !== agent || agent.finished) return;
+        if (status.code !== 0) return;
+
+        if (status.stdout.trim()) {
+          if ((!live || agent.failed) && !agent.retryOffered) {
+            agent.retryOffered = true;
+            this.treeAgent = null;
+            this.treeAgentStarting = false;
+            this.closeTreeAgentTab(agent);
+            notify({
+              title: "AI commit worker stopped",
+              body: "The working tree still has changes. Choose a model to try again.",
+              level: "error",
+            });
+            this.openCleanAgentModelPicker(
+              cx,
+              "The AI model stopped before the tree was clean. Choose another model to retry."
+            );
+            cx.notify();
+          }
+          return;
+        }
+
+        let commitCount = 0;
+        const from = agent.headBefore;
+        const countArgs = from ? ["rev-list", "--count", `${from}..HEAD`] : ["rev-list", "--count", "HEAD"];
+        const count = await exec("git", countArgs, { cwd: agent.root, on: agent.on });
+        if (count.code === 0) commitCount = Number(count.stdout.trim()) || 0;
+        if (this.treeAgent !== agent || agent.finished) return;
+        this.finishTreeAgent(agent, cx, commitCount);
+      } finally {
+        agent.checking = false;
+        if (this.treeAgent === agent) cx.notify();
+      }
+    });
+  }
+
+  /** Kill the worker terminal and close the tab/pane that showed it. */
+  closeTreeAgentTab(agent) {
+    const address = agent?.address;
+    const pane = address ? panes().find((p) => p.terminal === address) : null;
+    const tab = pane ? spaces().flatMap((s) => s.tabs).find((t) => t.id === pane.tab) : null;
+    if (address) run("terminal.kill", { terminal: address });
+    if (tab && tab.panes <= 1) {
+      run("tab.close", { id: tab.id });
+    } else if (pane) {
+      run("pane.close", { pane: pane.pane });
+    }
+  }
+
+  /** The commits landed and the tree is clean: close the worker for good. */
+  finishTreeAgent(agent, cx, commitCount) {
+    if (this.treeAgent !== agent) return;
+    agent.finished = true;
+    this.treeAgent = null;
+    this.treeAgentStarting = false;
+    this.closeTreeAgentTab(agent);
+    notify({
+      title: "AI commit worker finished",
+      body:
+        commitCount > 0
+          ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · worker tab closed`
+          : "Working tree is clean · worker tab closed",
+      level: "success",
+    });
+    this.refresh(cx);
+    cx.notify();
   }
 
   /** A unique, human-readable `hc run` name for the cleanup terminal. */
@@ -4091,11 +4595,13 @@ export default class GitGraph extends View {
   }
 
   /**
-   * Starts OpenCode's mini interface in a background Herdr terminal. It gets
-   * the current branch, dirty paths and in-progress operation in its first
-   * message, plus explicit no-push/no-branch-switch rules.
+   * Starts OpenCode's mini interface in a background Herdr terminal. It picks
+   * the best available free model, gets the current branch, dirty paths and
+   * in-progress operation in its first message, plus explicit
+   * no-push/no-branch-switch rules. If no free model can start, the model
+   * picker opens so the person can choose one.
    */
-  startTreeAgent(cx) {
+  startTreeAgent(cx, requestedModel = null) {
     if (!this.root || this.treeAgentStarting) return;
     if (this.treeAgentBusy()) return;
     if (this.detached) {
@@ -4124,6 +4630,25 @@ export default class GitGraph extends View {
 
     cx.spawn(async (cx) => {
       try {
+        const headRes = await exec("git", [...READ, "rev-parse", "HEAD"], { cwd: root, on });
+        const headBefore = headRes.code === 0 ? headRes.stdout.trim() : null;
+
+        const models = await this.loadCleanAgentModels(root, on);
+        const model = this.resolveCleanAgentModel(models, requestedModel);
+        if (!model) {
+          notify({
+            title: "No free AI model is available",
+            body: "Choose a model for the AI commit worker.",
+            level: "error",
+          });
+          this.openCleanAgentModelPicker(
+            cx,
+            "No free model is available. Choose one of the available models to run the AI commit worker."
+          );
+          return;
+        }
+        this.treeAgentModel = model;
+
         const args = ["run", "--bg", "--json", "--keep", "--no-parent", "--cwd", root, "--name", name];
         if (on) args.push("--on", on);
         if (!on && space?.id) args.push("--label", `herdr.space=${space.id}`);
@@ -4137,7 +4662,7 @@ export default class GitGraph extends View {
           "--agent",
           "build",
           "--model",
-          CLEAN_AGENT_MODEL,
+          model,
           "--prompt",
           prompt
         );
@@ -4158,23 +4683,31 @@ export default class GitGraph extends View {
           sessionId,
           root,
           on,
+          headBefore,
+          model,
           startedAt: Date.now(),
           found: false,
           busy: null,
+          checking: false,
+          finished: false,
+          retryOffered: false,
         };
         notify({
           title: `${CLEAN_AGENT_LABEL} is cleaning the tree`,
-          body: `Started ${name} in the background${address ? ` (${address})` : ""}. Click to peek.`,
+          body: `${cleanModelLabel(model)} · started ${name} in the background${
+            address ? ` (${address})` : ""
+          }. The worker tab closes when the commits land.`,
           level: "success",
           ...(address ? { action: { name: "terminal.peek", args: { terminal: address } } } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         notify({
-          title: "Could not start the cleanup agent",
+          title: "Could not start the AI commit worker",
           body: msg.length > 600 ? `${msg.slice(0, 600)}…` : msg,
           level: "error",
         });
+        this.openCleanAgentModelPicker(cx, msg);
       } finally {
         this.treeAgentStarting = false;
         cx.notify();
@@ -4182,7 +4715,7 @@ export default class GitGraph extends View {
     });
   }
 
-  /** One background-cleanup button for the toolbar, beside the branch controls. */
+  /** One AI commit-worker button for the toolbar, beside the branch controls. */
   treeAgentButton(t, cx, isCompact) {
     const status = this.treeAgentStatus();
     const busy = this.treeAgentBusy();
@@ -4190,14 +4723,15 @@ export default class GitGraph extends View {
     const hardDisabled = !this.root || clean || this.detached || this.busy;
     const disabled = this.treeAgentStarting || (!busy && hardDisabled);
     const showLabel = !isCompact && this.width >= 900;
+    const model = cleanModelLabel(this.cleanAgentModelLabel());
 
     let tip;
     if (this.treeAgentStarting) {
-      tip = `Starting ${CLEAN_AGENT_LABEL}…`;
+      tip = `Starting ${CLEAN_AGENT_LABEL} with ${model}…`;
     } else if (busy && status === "blocked") {
-      tip = `${CLEAN_AGENT_LABEL} is waiting for you · click to peek`;
+      tip = `${CLEAN_AGENT_LABEL} is waiting for you (${model}) · click to peek`;
     } else if (busy) {
-      tip = `${CLEAN_AGENT_LABEL} is cleaning the tree · click to peek`;
+      tip = `${CLEAN_AGENT_LABEL} is cleaning the tree with ${model} · click to peek · right-click to change model`;
     } else if (!this.root) {
       tip = "Open a Git repository first";
     } else if (this.detached) {
@@ -4205,9 +4739,9 @@ export default class GitGraph extends View {
     } else if (clean) {
       tip = "Working tree is clean";
     } else if (this.inProgressOp) {
-      tip = `Resolve the ${this.inProgressOp.type} and commit with ${CLEAN_AGENT_LABEL} (low reasoning, no push)`;
+      tip = `Resolve the ${this.inProgressOp.type} and commit with ${CLEAN_AGENT_LABEL} (${model}, no push)`;
     } else {
-      tip = `Clean the tree with ${CLEAN_AGENT_LABEL}: resolve conflicts, make atomic commits (low reasoning, no push)`;
+      tip = `Clean the tree with ${CLEAN_AGENT_LABEL} (${model}, free when available, no push) · right-click to choose a model`;
     }
 
     return h_flex()
@@ -4226,6 +4760,11 @@ export default class GitGraph extends View {
       .accessibility_label(`Clean tree with ${CLEAN_AGENT_LABEL}${disabled ? " (unavailable)" : ""}`)
       .tooltip(tip)
       .disabled(disabled)
+      .on_mouse_down("right", (_e, cx) => {
+        cx.stop_propagation();
+        if (disabled) return;
+        this.openCleanAgentModelPicker(cx);
+      })
       .on_click((_e, cx) => {
         if (busy && this.treeAgent?.address) {
           run("terminal.peek", { terminal: this.treeAgent.address });
@@ -4233,7 +4772,7 @@ export default class GitGraph extends View {
         }
         this.startTreeAgent(cx);
       })
-      .child(svg("icons/opencode.svg").size(12).text_color(color(disabled ? t.dim : t.accent)))
+      .child(svg("mods/git-graph/icons/sparkles.svg").size(12).text_color(color(disabled ? t.dim : t.accent)))
       .when(showLabel, (e) =>
         e.child(
           div()
@@ -4727,6 +5266,16 @@ export default class GitGraph extends View {
     const isConfirm = dialog.type.startsWith("confirm-");
     // The panel is narrower than the tab; keep the dialog inside the card.
     const dialogWidth = this.width > 0 ? Math.min(400, Math.max(280, this.width - 24)) : 400;
+    const providerPool = dialog.type === "clean-model" ? this.cleanProviderPool(dialog) : [];
+    const freeModels = providerPool.filter((m) => m.free);
+    const modelQuery = String(dialog.search || "").trim().toLowerCase();
+    const shownModels = dialog.type === "clean-model" ? this.cleanVisibleModels(dialog) : [];
+    const selectedBase = String(dialog.selected || "").split("#")[0];
+    // A fixed frame keeps the header, hint and buttons on screen while the
+    // model list scrolls inside it, even in a short docked panel.
+    const modelDialog = dialog.type === "clean-model";
+    const availableHeight = this.height > 0 ? this.height - 24 : 560;
+    const modelDialogHeight = Math.max(220, Math.min(560, availableHeight));
 
     return div()
       .id("modal-backdrop")
@@ -4741,6 +5290,7 @@ export default class GitGraph extends View {
         v_flex()
           .id("modal-dialog")
           .w(dialogWidth)
+          .when(modelDialog, (e) => e.h(modelDialogHeight))
           .p(16)
           .rounded(10)
           .bg(color(t.raised))
@@ -4752,6 +5302,7 @@ export default class GitGraph extends View {
           // Modal Header
           .child(
             v_flex()
+              .flex_none()
               .gap(3)
               .child(
                 div()
@@ -4759,7 +5310,9 @@ export default class GitGraph extends View {
                   .text_size(13)
                   .text_color(color(t.foreground))
                   .child(
-                    dialog.type === "stash"
+                    dialog.type === "clean-model"
+                      ? "AI commit model"
+                      : dialog.type === "stash"
                       ? dialog.stashStaged
                         ? "Stash Staged Changes"
                         : "Stash All Changes"
@@ -4797,7 +5350,9 @@ export default class GitGraph extends View {
                   .text_size(11)
                   .text_color(color(t.muted))
                   .child(
-                    dialog.type === "stash"
+                    dialog.type === "clean-model"
+                      ? "Pick a provider tab or search any model. Free models come first; use Show all to browse the rest."
+                      : dialog.type === "stash"
                       ? dialog.stashStaged
                         ? "Save only the staged changes to a new stash, leaving unstaged edits in place"
                         : `Save ${this.workingTreeFiles.length} uncommitted file${this.workingTreeFiles.length === 1 ? "" : "s"} to a new stash`
@@ -4896,6 +5451,7 @@ export default class GitGraph extends View {
           .when(Boolean(dialog.error), (e) =>
             e.child(
               div()
+                .flex_none()
                 .p(6)
                 .rounded(4)
                 .bg(color(t.ansi1 + "20"))
@@ -4904,6 +5460,193 @@ export default class GitGraph extends View {
                 .text_size(11)
                 .text_color(color(t.ansi1))
                 .child(dialog.error || "")
+            )
+          )
+          // AI model picker: free models first, with its own search.
+          .when(dialog.type === "clean-model", (e) =>
+            e.child(
+              v_flex()
+                .flex_1()
+                .min_h(0)
+                .gap(6)
+                .when(!dialog.loading, (el) => el.child(this.cleanProviderTabs(dialog, t, cx)))
+                .child(
+                  h_flex()
+                    .id("model-search")
+                    .flex_none()
+                    .h(30)
+                    .px(8)
+                    .gap(6)
+                    .items_center()
+                    .rounded(6)
+                    .border_1()
+                    .border_color(color(t.border))
+                    .bg(color(t.background))
+                    .child(svg("mods/git-graph/icons/search.svg").size(11).text_color(color(t.dim)))
+                    .child(
+                      Input.new(dialog.searchInput)
+                        .flex_1()
+                        .h_full()
+                        .text_size(11)
+                        .text_color(color(t.foreground))
+                    )
+                    .when(Boolean(dialog.search), (el) =>
+                      el.child(
+                        div()
+                          .id("model-search-clear")
+                          .px(4)
+                          .cursor_pointer()
+                          .text_size(11)
+                          .text_color(color(t.muted))
+                          .hover((s) => s.text_color(color(t.foreground)))
+                          .on_click((_e, cx) => {
+                            dialog.searchInput?.set_value("");
+                            dialog.search = "";
+                            const visible = this.cleanVisibleModels(dialog);
+                            if (!visible.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
+                              dialog.selected = visible[0]?.id || null;
+                            }
+                            cx.notify();
+                          })
+                          .child("×")
+                      )
+                    )
+                )
+                .when(dialog.loading, (el) =>
+                  el.child(
+                    h_flex()
+                      .flex_1()
+                      .min_h(0)
+                      .p(12)
+                      .items_center()
+                      .child(div().text_size(11).text_color(color(t.muted)).child("Loading models from opencode…"))
+                  )
+                )
+                .when(!dialog.loading, (el) =>
+                  el.child(
+                    v_flex()
+                      .flex_1()
+                      .min_h(0)
+                      .gap(4)
+                      .child(
+                        v_flex()
+                          .id("modal-model-list")
+                          .flex_1()
+                          .min_h(0)
+                          .gap(2)
+                          .overflow_y_scrollbar()
+                          .mode("always")
+                          .when(shownModels.length === 0, (list) =>
+                            list.child(
+                              div()
+                                .flex_none()
+                                .p(8)
+                                .text_size(11)
+                                .text_color(color(t.muted))
+                                .child(
+                                  modelQuery
+                                    ? `No models match “${dialog.search.trim()}”.`
+                                    : "No models found. Check that the opencode CLI is available."
+                                )
+                            )
+                          )
+                          .children(
+                            shownModels.map((m, i) => {
+                              const active = selectedBase === m.id;
+                              return h_flex()
+                                .id(`model-opt-${i}`)
+                                .flex_none()
+                                .px(8)
+                                .py(5)
+                                .gap(8)
+                                .items_center()
+                                .rounded(5)
+                                .border_1()
+                                .border_color(color(active ? t.accent : t.border))
+                                .bg(color(active ? t.selected : t.background))
+                                .cursor_pointer()
+                                .hover((s) => s.bg(color(t.hover)))
+                                .on_click((_e, cx) => {
+                                  dialog.selected = m.id;
+                                  dialog.error = null;
+                                  cx.notify();
+                                })
+                                .child(
+                                  v_flex()
+                                    .flex_1()
+                                    .min_w(0)
+                                    .child(
+                                      div()
+                                        .truncate()
+                                        .text_size(11)
+                                        .font_medium()
+                                        .text_color(color(active ? t.accent : t.foreground))
+                                        .child(m.label)
+                                    )
+                                    .child(div().truncate().text_size(9).text_color(color(t.muted)).child(m.id))
+                                )
+                                .when(m.free, (el) =>
+                                  el.child(
+                                    div()
+                                      .px(4)
+                                      .py(1)
+                                      .rounded(3)
+                                      .bg(color(t.ansi2 + "22"))
+                                      .text_size(8)
+                                      .font_medium()
+                                      .text_color(color(t.ansi2))
+                                      .child("FREE")
+                                  )
+                                )
+                                .when(active, (el) =>
+                                  el.child(svg("mods/git-graph/icons/check.svg").size(12).text_color(color(t.accent)))
+                                );
+                            })
+                          )
+                      )
+                      .when(!modelQuery && freeModels.length > 0 && providerPool.length > freeModels.length, (body) =>
+                        body.child(
+                          h_flex()
+                            .id("model-show-all")
+                            .flex_none()
+                            .h(24)
+                            .px(8)
+                            .items_center()
+                            .rounded(5)
+                            .cursor_pointer()
+                            .hover((s) => s.bg(color(t.hover)))
+                            .on_click((_e, cx) => {
+                              dialog.showAll = !dialog.showAll;
+                              if (
+                                !dialog.showAll &&
+                                selectedBase &&
+                                !freeModels.some((m) => m.id === selectedBase)
+                              ) {
+                                dialog.selected = freeModels[0]?.id || null;
+                              }
+                              cx.notify();
+                            })
+                            .child(
+                              div()
+                                .text_size(10)
+                                .text_color(color(t.accent))
+                                .child(
+                                  dialog.showAll
+                                    ? "Show free models only"
+                                    : `Show all ${providerPool.length} models`
+                                )
+                            )
+                        )
+                      )
+                      .child(
+                        div()
+                          .flex_none()
+                          .text_size(9)
+                          .text_color(color(t.muted))
+                          .child("Free models are used automatically. The worker commits on the current branch and never pushes.")
+                      )
+                  )
+                )
             )
           )
           // Branch inputs: Name + Checkout toggle
@@ -5178,6 +5921,7 @@ export default class GitGraph extends View {
           // Modal Action Buttons
           .child(
             h_flex()
+              .flex_none()
               .gap(8)
               .justify_end()
               .child(
@@ -5222,6 +5966,8 @@ export default class GitGraph extends View {
                         : dialog.type === "drop-stash"
                         ? "Dropping…"
                         : "Working…"
+                      : dialog.type === "clean-model"
+                      ? "Start agent"
                       : dialog.type === "stash"
                       ? dialog.stashStaged
                         ? "Stash Staged"
@@ -5467,7 +6213,7 @@ export default class GitGraph extends View {
               .child(this.remoteActionButton("push", t, cx))
           )
           .child(div().w(1).h(16).flex_none().bg(color(t.border)))
-          // Background cleanup agent (OpenCode Mini, low reasoning)
+          // AI commit worker (best free model, closes its tab when done)
           .child(this.treeAgentButton(t, cx, isCompact))
           // Search Box (Expanded when not compact, or when searchOpen in compact mode)
           .when(!isCompact, (e) =>
