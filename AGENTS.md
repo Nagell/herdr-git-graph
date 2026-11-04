@@ -110,6 +110,14 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - `Enter` submits active dialog prompts.
   - `r` refreshes repository state, `b` toggles current branch vs. all branches.
 
+## Tests
+
+Run the test suite:
+
+```sh
+node --test test/
+```
+
 ## How to Open in Herdr
 
 ### Split beside an active terminal
