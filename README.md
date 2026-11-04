@@ -141,6 +141,10 @@ Changes view:
 
 The button keeps working — it now toggles the graph instead of the old changes
 list, with the working tree row, file tree, and diff tabs already built in.
+The panel resolves its repository from the selected space, checks that location
+four times a second, and reloads as soon as it changes — so switching spaces
+updates the Changes panel immediately. A pinned space still keeps its pinned
+folder regardless of where its terminals `cd`.
 
 ### Test Preview Props
 For headless testing or automated surface inspection, open specific overlays on first load using the `preview` prop (`"context-menu"`, `"dropdown"`, `"modal-branch"`, `"modal-tag"`, `"modal-reset"`, `"confirm-merge"`, `"file-diff"`):

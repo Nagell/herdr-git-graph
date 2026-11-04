@@ -72,8 +72,12 @@ function resolveLocation(manualRoot, currentRoot) {
   }
   const space = spaces().find((s) => s.active);
   const f = focused();
+  // Herdr can keep focus in the previous space when the selected one has no
+  // pane to focus (a pinned placeholder, say). Never read that pane's folder
+  // as this space's: fall through to the space's own folder or terminals.
+  const mine = Boolean(f && f.space === space?.id);
   const on =
-    f?.pane === null
+    mine && f?.pane === null
       ? f.terminal?.includes("/")
         ? f.terminal.split("/")[0]
         : null
@@ -86,8 +90,8 @@ function resolveLocation(manualRoot, currentRoot) {
 
   // 1. The terminal you are looking at: the graph follows it, unless it is
   //    already inside the repo on screen.
-  const focusedPane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
-  const focusedCwd = focusedPane?.cwd || (f?.terminal ? f?.cwd : null);
+  const focusedPane = mine && f?.pane ? panes().find((p) => p.pane === f.pane) : null;
+  const focusedCwd = focusedPane?.cwd || (mine && f?.terminal ? f?.cwd : null);
   if (focusedCwd) {
     if (currentRoot && (focusedCwd === currentRoot || focusedCwd.startsWith(currentRoot + "/"))) {
       return { cwd: currentRoot, on };
@@ -96,7 +100,7 @@ function resolveLocation(manualRoot, currentRoot) {
   }
 
   // 2. The terminal in this mod's own tab: the pane it was split beside.
-  const activeTabPane = panes().find((p) => p.tab === f?.tab && p.cwd && !p.mod);
+  const activeTabPane = mine ? panes().find((p) => p.tab === f?.tab && p.cwd && !p.mod) : null;
   if (activeTabPane?.cwd) {
     if (currentRoot && (activeTabPane.cwd === currentRoot || activeTabPane.cwd.startsWith(currentRoot + "/"))) {
       return { cwd: currentRoot, on };
@@ -276,6 +280,10 @@ export default class GitGraph extends View {
 
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
+    // Switching spaces does not re-render the panel by itself: watch the
+    // resolved location (in memory only, no git) so the graph follows the
+    // selected space at once instead of waiting for the next full refresh.
+    cx.timer.every(250, (cx) => { if (this.getKey() !== this.context) cx.notify(); });
   }
 
   async close(_cx) {

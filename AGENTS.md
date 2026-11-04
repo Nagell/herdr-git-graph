@@ -23,6 +23,8 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - Retains user-selected repositories via `this.manualRoot` from `pickFolder()` so clicking into the graph never resets the repository view.
   - A **pinned space is anchored to its pinned location** (`spaces.pinned_locations`): terminals inside the space may `cd` anywhere, but the graph stays on the pinned project.
   - Unpinned spaces follow: the focused terminal's cwd, the terminal in this mod's own tab (the split partner), the space's folder, the root already resolved, then any terminal in the space.
+  - A focus left behind in the previous space (when the selected space has no pane) is ignored, so the panel never reads another space's folder.
+  - The resolved location is checked every 250 ms (in memory only): switching spaces reloads the panel at once instead of waiting for the 10 s refresh.
   - `space.folder` is only a fallback, because Herdr sets it when the space is created and never updates it.
 - **Safe Git Log Parsing & Unborn Branch Handling**:
   - Detects unborn branches via `git branch --show-current` with fallback to `HEAD`.
