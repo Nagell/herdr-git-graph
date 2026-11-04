@@ -12,6 +12,7 @@ repo/
 ├── README.md
 ├── RECIPE.md
 ├── preview.png
+├── keys.json          # optional key snippet to merge into the user's keys
 ├── sync.sh
 ├── .gitignore
 └── mods/
@@ -108,12 +109,14 @@ herdr-app status
 
 A shared app mod is a public GitHub repository with:
 
-- `mods/<name>/` at the root (one folder per mod; several mods allowed when they are one feature).
+- `mods/<name>/` at the root. One repo can hold several mods, each in its own `mods/<name>/` folder; document that they are installed together when they are one feature.
+- No `layouts/` folder: a mod is a piece for the user's existing layout.
 - `RECIPE.md` in the Herdr sharing format.
-- `preview.png` with a real screenshot.
+- `preview.png` with a real screenshot. Community pictures are screened before they appear.
+- Optional `keys.json` at the repo root with a snippet users can merge into their own `keys.json`.
 - GitHub topic `herdr-mod`.
 
-The index at `herdr.dev/mods` refreshes within about an hour. It is a community index, not a reviewed catalog.
+The index at `herdr.dev/mods` refreshes within about an hour. It is a community index, not a reviewed catalog. Mods are trusted code, not sandboxed: users should read the recipe and source before installing.
 
 `RECIPE.md` sections:
 
@@ -132,6 +135,7 @@ The index at `herdr.dev/mods` refreshes within about an hour. It is a community 
 - [ ] `./sync.sh` passes `herdr-app check` for every mod.
 - [ ] The mod works in the running app; `herdr-app status` has no errors.
 - [ ] `README.md` lists requirements and the exact layout wiring.
-- [ ] `RECIPE.md` and `preview.png` exist.
+- [ ] `RECIPE.md` and `preview.png` exist; the preview is a real screenshot.
+- [ ] No `layouts/` folder; optional `keys.json` is valid JSON.
 - [ ] The repo is public and has topic `herdr-mod`.
 - [ ] The exact install/sync steps are documented.
