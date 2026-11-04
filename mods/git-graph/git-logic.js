@@ -1,0 +1,1179 @@
+// Pure logic functions for Git Graph: ref parsing, topological DAG lane calculation,
+// file tree construction, and diff line formatting.
+
+export function countLines(text) {
+  return text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
+}
+
+export function formatRelativeTime(epochSec) {
+  if (!epochSec) return "";
+  const now = Math.floor(Date.now() / 1000);
+  const diff = now - epochSec;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
+  const date = new Date(epochSec * 1000);
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+export function getLaneColor(idx, t) {
+  const palette = [
+    t.accent,
+    t.ansi2,
+    t.ansi4,
+    t.ansi5,
+    t.ansi3,
+    t.ansi6,
+    t.ansi1,
+    t.working,
+    t.done,
+  ].filter(Boolean);
+  return palette[Math.abs(idx) % palette.length] || t.accent || "#3b82f6";
+}
+
+export function getStatusColor(status, t) {
+  switch (status) {
+    case "A":
+      return t.ansi2;
+    case "D":
+      return t.ansi1;
+    case "U":
+      return t.ansi3;
+    case "M":
+    default:
+      return t.ansi4;
+  }
+}
+
+/**
+ * Parses decorated ref strings produced by `git log --decorate=full --format=%D`.
+ * Correctly distinguishes local branches with slashes (e.g. refs/heads/feat/foo)
+ * from remote branches (refs/remotes/origin/...) and filters out symbolic refs (origin/HEAD).
+ *
+ * @param {string} refStr
+ * @returns {Array<{ kind: "head" | "local" | "remote" | "tag", text: string }>}
+ */
+export function parseRefs(refStr) {
+  if (!refStr) return [];
+  const clean = refStr.trim().replace(/^\(/, "").replace(/\)$/, "").trim();
+  if (!clean) return [];
+  const items = clean.split(", ");
+  /** @type {Array<{ kind: "head" | "local" | "remote" | "tag", text: string }>} */
+  const badges = [];
+
+  for (const rawItem of items) {
+    const item = rawItem.trim();
+    if (!item) continue;
+
+    // HEAD pointing to local branch
+    if (item.includes("HEAD -> refs/heads/")) {
+      badges.push({ kind: "head", text: "HEAD" });
+      const branch = item.replace("HEAD -> refs/heads/", "").trim();
+      badges.push({ kind: "local", text: branch });
+      continue;
+    }
+
+    // HEAD pointing to remote branch
+    if (item.includes("HEAD -> refs/remotes/")) {
+      badges.push({ kind: "head", text: "HEAD" });
+      const remote = item.replace("HEAD -> refs/remotes/", "").trim();
+      if (!remote.endsWith("/HEAD") && remote !== "HEAD") {
+        badges.push({ kind: "remote", text: remote });
+      }
+      continue;
+    }
+
+    // Generic HEAD pointer (non-full fallback)
+    if (item.includes("HEAD -> ")) {
+      badges.push({ kind: "head", text: "HEAD" });
+      const branch = item.replace("HEAD -> ", "").trim();
+      badges.push({ kind: "local", text: branch });
+      continue;
+    }
+
+    if (item === "HEAD") {
+      badges.push({ kind: "head", text: "HEAD" });
+      continue;
+    }
+
+    // Tags
+    if (item.startsWith("tag: refs/tags/")) {
+      badges.push({ kind: "tag", text: item.slice("tag: refs/tags/".length).trim() });
+      continue;
+    }
+    if (item.startsWith("refs/tags/")) {
+      badges.push({ kind: "tag", text: item.slice("refs/tags/".length).trim() });
+      continue;
+    }
+    if (item.startsWith("tag: ")) {
+      badges.push({ kind: "tag", text: item.slice(5).trim() });
+      continue;
+    }
+
+    // Remote branches (e.g. refs/remotes/origin/main, refs/remotes/origin/feat/foo)
+    if (item.startsWith("refs/remotes/")) {
+      const remote = item.slice("refs/remotes/".length).trim();
+      // Hide symbolic HEAD refs like origin/HEAD
+      if (!remote.endsWith("/HEAD") && remote !== "HEAD") {
+        badges.push({ kind: "remote", text: remote });
+      }
+      continue;
+    }
+
+    // Local branches (e.g. refs/heads/main, refs/heads/feat/test-slash)
+    if (item.startsWith("refs/heads/")) {
+      badges.push({ kind: "local", text: item.slice("refs/heads/".length).trim() });
+      continue;
+    }
+
+    // Fallbacks for non-full decorate
+    if (item.startsWith("origin/") || item.startsWith("upstream/")) {
+      if (!item.endsWith("/HEAD") && item !== "HEAD") {
+        badges.push({ kind: "remote", text: item });
+      }
+      continue;
+    }
+
+    badges.push({ kind: "local", text: item });
+  }
+
+  return badges;
+}
+
+/**
+ * Computes topological DAG lanes for commits with stable line colors.
+ * Keeps each branch line's color index consistent throughout its lifetime.
+ * Outgoing connections to parents outside the loaded set terminate cleanly at row edge.
+ *
+ * @param {Array<any>} commits
+ * @returns {number} maxGlobalLane
+ */
+export function computeLanes(commits) {
+  let activeLanes = [];
+  let activeLaneColors = [];
+  let nextColorIdx = 0;
+  let maxGlobalLane = 0;
+  const commitHashes = new Set(commits.map((c) => c.hash));
+
+  for (let i = 0; i < commits.length; i++) {
+    const commit = commits[i];
+    const hash = commit.hash;
+    const parents = commit.parents || [];
+
+    // Find all indices in activeLanes where activeLanes[l] === commit.hash
+    const matchingLanes = [];
+    for (let l = 0; l < activeLanes.length; l++) {
+      if (activeLanes[l] === hash) {
+        matchingLanes.push(l);
+      }
+    }
+
+    let lane;
+    let colorIdx;
+    if (matchingLanes.length > 0) {
+      lane = matchingLanes[0];
+      colorIdx = activeLaneColors[lane] ?? nextColorIdx++;
+      commit.fromChild = true;
+      commit.convergingLanes = matchingLanes.slice(1).map((cLane) => ({
+        lane: cLane,
+        colorIdx: activeLaneColors[cLane] ?? cLane,
+      }));
+      // Clear matching lanes
+      for (const m of matchingLanes) {
+        activeLanes[m] = null;
+        activeLaneColors[m] = null;
+      }
+    } else {
+      const firstNull = activeLanes.indexOf(null);
+      if (firstNull === -1) {
+        lane = activeLanes.length;
+        activeLanes.push(null);
+        activeLaneColors.push(null);
+      } else {
+        lane = firstNull;
+      }
+      colorIdx = nextColorIdx++;
+      commit.fromChild = false;
+      commit.convergingLanes = [];
+    }
+
+    commit.lane = lane;
+    commit.colorIdx = colorIdx;
+
+    // Pass-through lanes: lanes that continue across this commit row
+    commit.passThroughLanes = [];
+    for (let l = 0; l < activeLanes.length; l++) {
+      if (activeLanes[l] !== null && l !== lane) {
+        commit.passThroughLanes.push({
+          lane: l,
+          colorIdx: activeLaneColors[l] ?? l,
+        });
+      }
+    }
+
+    // Process parents
+    commit.parentConnections = [];
+    for (let pIdx = 0; pIdx < parents.length; pIdx++) {
+      const pHash = parents[pIdx];
+      const parentExists = commitHashes.has(pHash);
+
+      if (!parentExists) {
+        // Parent is outside the current filtered view or reachability.
+        // Render an outgoing connector that gracefully terminates at the row edge.
+        commit.parentConnections.push({
+          toLane: lane,
+          colorIdx: colorIdx,
+          parentHash: pHash,
+          terminated: true,
+        });
+        continue;
+      }
+
+      const existingLane = activeLanes.indexOf(pHash);
+      if (existingLane !== -1) {
+        commit.parentConnections.push({
+          toLane: existingLane,
+          colorIdx: activeLaneColors[existingLane] ?? existingLane,
+          parentHash: pHash,
+          terminated: false,
+        });
+      } else {
+        if (pIdx === 0 && activeLanes[lane] === null) {
+          activeLanes[lane] = pHash;
+          activeLaneColors[lane] = colorIdx; // retain stream color
+          commit.parentConnections.push({
+            toLane: lane,
+            colorIdx: colorIdx,
+            parentHash: pHash,
+            terminated: false,
+          });
+        } else {
+          let newLane = activeLanes.indexOf(null);
+          const newColor = nextColorIdx++;
+          if (newLane === -1) {
+            newLane = activeLanes.length;
+            activeLanes.push(pHash);
+            activeLaneColors.push(newColor);
+          } else {
+            activeLanes[newLane] = pHash;
+            activeLaneColors[newLane] = newColor;
+          }
+          commit.parentConnections.push({
+            toLane: newLane,
+            colorIdx: newColor,
+            parentHash: pHash,
+            terminated: false,
+          });
+        }
+      }
+    }
+
+    // Trim trailing nulls
+    while (activeLanes.length > 0 && activeLanes[activeLanes.length - 1] === null) {
+      activeLanes.pop();
+      activeLaneColors.pop();
+    }
+
+    const rowMax = Math.max(
+      lane,
+      ...commit.passThroughLanes.map((p) => p.lane),
+      ...commit.convergingLanes.map((c) => c.lane),
+      ...commit.parentConnections.map((c) => c.toLane),
+      0
+    );
+    if (rowMax > maxGlobalLane) maxGlobalLane = rowMax;
+    commit.maxLaneAtRow = rowMax;
+  }
+
+  return maxGlobalLane;
+}
+
+/**
+ * Builds a hierarchical tree from a flat list of files with changed paths.
+ */
+export function buildFileTree(files) {
+  const root = { isDir: true, path: "", name: "", children: new Map(), add: 0, del: 0 };
+
+  for (const file of files) {
+    const parts = file.path.split("/");
+    let current = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      const dirPath = parts.slice(0, i + 1).join("/");
+      if (!current.children.has(part)) {
+        current.children.set(part, {
+          isDir: true,
+          path: dirPath,
+          name: part,
+          children: new Map(),
+          add: 0,
+          del: 0,
+        });
+      }
+      const dirNode = current.children.get(part);
+      dirNode.add += file.add || 0;
+      dirNode.del += file.del || 0;
+      current = dirNode;
+    }
+    const fileName = parts[parts.length - 1];
+    current.children.set(fileName, {
+      isDir: false,
+      path: file.path,
+      name: fileName,
+      file,
+      add: file.add || 0,
+      del: file.del || 0,
+      status: file.status || "M",
+    });
+    root.add += file.add || 0;
+    root.del += file.del || 0;
+  }
+
+  return root;
+}
+
+/**
+ * Flattens the file tree into rows for display, sorting folders first then files alphabetically.
+ */
+export function flattenFileTree(node, depth, collapsedFolders, rows = []) {
+  const entries = Array.from(node.children.values());
+  entries.sort((a, b) => {
+    if (a.isDir !== b.isDir) {
+      return a.isDir ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  for (const entry of entries) {
+    if (entry.isDir) {
+      const isExpanded = !collapsedFolders.has(entry.path);
+      rows.push({
+        isDir: true,
+        path: entry.path,
+        name: entry.name,
+        depth,
+        isExpanded,
+        add: entry.add,
+        del: entry.del,
+      });
+      if (isExpanded) {
+        flattenFileTree(entry, depth + 1, collapsedFolders, rows);
+      }
+    } else {
+      rows.push({
+        isDir: false,
+        path: entry.path,
+        name: entry.name,
+        depth,
+        file: entry.file,
+        status: entry.status,
+        add: entry.add,
+        del: entry.del,
+      });
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Parses a unified diff into the rows the diff tab draws.
+ *
+ * File headers (`diff --git`, `index`, `---`, `+++`, mode/rename lines) are
+ * dropped: the tab header already names the file. Hunk headers become their
+ * own row, and every line carries the old and new line numbers so the view can
+ * show both gutters.
+ *
+ * @param {string} text
+ * @returns {Array<{ kind: "@" | "+" | "-" | " " | "\\" | "", text: string, oldNum?: number, newNum?: number }>}
+ */
+export function diffRows(text) {
+  /** @type {Array<any>} */
+  const rows = [];
+  let oldNum = 0;
+  let newNum = 0;
+  let inHunk = false;
+  const clip = (line) => (line.length > 4000 ? line.slice(0, 4000) + "…" : line);
+
+  for (const raw of text.split("\n")) {
+    if (
+      raw.startsWith("diff --git ") ||
+      raw.startsWith("index ") ||
+      raw.startsWith("--- ") ||
+      raw.startsWith("+++ ") ||
+      raw.startsWith("new file mode ") ||
+      raw.startsWith("deleted file mode ") ||
+      raw.startsWith("old mode ") ||
+      raw.startsWith("new mode ") ||
+      raw.startsWith("similarity index ") ||
+      raw.startsWith("dissimilarity index ") ||
+      raw.startsWith("rename from ") ||
+      raw.startsWith("rename to ") ||
+      raw.startsWith("Binary files ")
+    ) {
+      continue;
+    }
+
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(raw);
+    if (hunk) {
+      inHunk = true;
+      oldNum = Number(hunk[1]);
+      newNum = Number(hunk[2]);
+      rows.push({ kind: "@", text: clip(raw) });
+      continue;
+    }
+
+    if (!inHunk) continue;
+    if (raw.startsWith("\\")) {
+      rows.push({ kind: "\\", text: clip(raw) });
+    } else if (raw.startsWith("-")) {
+      rows.push({ kind: "-", oldNum: oldNum++, text: clip(raw.slice(1)) });
+    } else if (raw.startsWith("+")) {
+      rows.push({ kind: "+", newNum: newNum++, text: clip(raw.slice(1)) });
+    } else if (raw.startsWith(" ")) {
+      rows.push({ kind: " ", oldNum: oldNum++, newNum: newNum++, text: clip(raw.slice(1)) });
+    } else if (raw) {
+      rows.push({ kind: "", text: clip(raw) });
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Builds safe arguments for git tag.
+ * Ensures --end-of-options precedes the user-provided name.
+ */
+export function tagArgs(name, msg, hash) {
+  if (msg) {
+    return ["tag", "-a", "-m", msg, "--end-of-options", name, hash];
+  }
+  return ["tag", "--end-of-options", name, hash];
+}
+
+/**
+ * Builds safe arguments for git log.
+ * Ensures options like --all precede --end-of-options, and -- terminates ref.
+ */
+export function logArgs(branchFilter, commitLimit = 500) {
+  const args = [
+    "log",
+    "--topo-order",
+    "--decorate=full",
+    "-n",
+    String(commitLimit),
+    "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s",
+  ];
+  if (branchFilter === "all") {
+    args.push("--all", "--");
+  } else if (branchFilter === "current") {
+    args.push("--end-of-options", "HEAD", "--");
+  } else {
+    args.push("--end-of-options", branchFilter, "--");
+  }
+  return args;
+}
+
+// --- Diff syntax highlighting -------------------------------------------
+
+const KEYWORDS = {
+  js: new Set(
+    "const let var function return if else for while do switch case break continue new class extends super this import export from default async await try catch finally throw typeof instanceof in of null undefined true false static get set yield delete void interface type enum implements readonly public private protected as satisfies keyof namespace declare abstract override using".split(" ")
+  ),
+  py: new Set(
+    "def class return if elif else for while in not and or is None True False import from as try except finally raise with yield lambda pass break continue global nonlocal async await self match case".split(" ")
+  ),
+  go: new Set(
+    "func package import var const type struct interface map chan go defer return if else for range switch case break continue select nil true false make new len cap append string int bool byte rune error float64 float32 int64 int32 uint uint64 uint32 any fallthrough goto".split(" ")
+  ),
+  rs: new Set(
+    "fn let mut const struct enum impl trait use mod pub crate self Self super match if else loop while for in return break continue where async await move ref as dyn type unsafe extern true false None Some Ok Err static union".split(" ")
+  ),
+  sh: new Set(
+    "if then else elif fi for while until do done case esac function in select time export local readonly return exit set unset shift source alias declare typeset break continue".split(" ")
+  ),
+  sql: new Set(
+    "select from where join left right inner outer full on group by order having limit offset insert into values update set delete create table alter drop index view and or not null as distinct count sum avg min max union all case when then else end like in exists between is".split(" ")
+  ),
+  css: new Set(["none", "inherit", "initial", "unset", "revert", "auto", "transparent", "currentColor"]),
+  data: new Set(["true", "false", "null", "yes", "no", "on", "off"]),
+};
+
+const LANGS = {
+  js: { line: ["//"], block: ["/*", "*/"], quotes: ["'", '"', "`"], keywords: KEYWORDS.js, id: /[A-Za-z_$][\w$]*/y },
+  css: {
+    line: ["//"],
+    block: ["/*", "*/"],
+    quotes: ["'", '"'],
+    keywords: KEYWORDS.css,
+    css: true,
+    id: /-{0,2}[A-Za-z_][\w-]*/y,
+  },
+  json: { quotes: ['"'], keywords: KEYWORDS.data, json: true, id: /[A-Za-z_$][\w$]*/y },
+  py: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.py, id: /[A-Za-z_][\w]*/y },
+  go: { line: ["//"], block: ["/*", "*/"], quotes: ["'", '"', "`"], keywords: KEYWORDS.go, id: /[A-Za-z_][\w]*/y },
+  rs: { line: ["//"], block: ["/*", "*/"], quotes: ['"'], keywords: KEYWORDS.rs, id: /[A-Za-z_][\w]*/y },
+  sh: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.sh, id: /[A-Za-z_][\w]*/y },
+  sql: { line: ["--"], block: ["/*", "*/"], quotes: ["'", '"'], keywords: KEYWORDS.sql, id: /[A-Za-z_][\w$]*/y, ci: true },
+  yaml: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.data, key: ":", id: /[A-Za-z_][\w.-]*/y },
+  toml: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.data, key: "=", id: /[A-Za-z_][\w.-]*/y },
+  html: { block: ["<!--", "-->"], quotes: ["'", '"'], keywords: new Set(), html: true, id: /[A-Za-z_:][\w:.-]*/y },
+  plain: { keywords: new Set(), id: /[A-Za-z_$][\w$]*/y },
+};
+
+const EXTENSION_LANG = {
+  js: "js", mjs: "js", cjs: "js", jsx: "js", ts: "js", tsx: "js", mts: "js", cts: "js",
+  css: "css", scss: "css", sass: "css", less: "css",
+  json: "json", jsonc: "json", json5: "json",
+  py: "py", pyi: "py",
+  go: "go", rs: "rs",
+  sh: "sh", bash: "sh", zsh: "sh", fish: "sh",
+  sql: "sql",
+  yml: "yaml", yaml: "yaml",
+  toml: "toml",
+  html: "html", htm: "html", vue: "html", svelte: "html", xml: "html", svg: "html",
+};
+
+/** The highlighter family for a file path, by extension. */
+export function languageOf(path) {
+  const name = String(path ?? "");
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  return EXTENSION_LANG[ext] ?? "plain";
+}
+
+/** Index of the closing quote, honouring backslash escapes, or -1. */
+function closingQuote(text, from, quote) {
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (text[i] === quote) return i;
+  }
+  return -1;
+}
+
+/**
+ * Splits one line into coloured spans for a language.
+ *
+ * The scanner is deliberately small: comments, strings, numbers, keywords,
+ * functions/types and (for CSS/YAML/TOML) keys and custom properties. Block
+ * comments and template literals carry over into the next line through
+ * `state`, so a multi-line comment is not repainted as code.
+ *
+ * @param {string} text
+ * @param {string} language
+ * @param {{ block?: boolean, quote?: string | null }} state
+ * @returns {Array<{ text: string, kind: string }>}
+ */
+export function tokenizeLine(text, language, state) {
+  const cfg = LANGS[language] ?? LANGS.plain;
+  /** @type {Array<{ text: string, kind: string }>} */
+  const spans = [];
+  const add = (kind, value) => {
+    if (value) spans.push({ text: value, kind });
+  };
+
+  let i = 0;
+  let pending = null;
+
+  // CSS declaration and YAML/TOML key: colour the leading name.
+  if (cfg.css) {
+    const m = /^(\s*)([A-Za-z-][\w-]*)(\s*):(?!:)/.exec(text);
+    if (m) {
+      add("plain", m[1]);
+      add("property", m[2]);
+      add("plain", m[3] + ":");
+      i = m[0].length;
+    }
+  } else if (cfg.key) {
+    const re = cfg.key === "=" ? /^(\s*)([A-Za-z_][\w.-]*)(\s*)=/ : /^(\s*(?:-\s+)?)([A-Za-z_][\w.-]*)(\s*):(?!:)/;
+    const m = re.exec(text);
+    if (m) {
+      add("plain", m[1]);
+      add("property", m[2]);
+      add("plain", m[3] + cfg.key);
+      i = m[0].length;
+    }
+  }
+
+  while (i < text.length) {
+    if (state.block) {
+      const end = cfg.block ? text.indexOf(cfg.block[1], i) : -1;
+      if (end === -1) {
+        add("comment", text.slice(i));
+        i = text.length;
+        break;
+      }
+      add("comment", text.slice(i, end + cfg.block[1].length));
+      i = end + cfg.block[1].length;
+      state.block = false;
+      continue;
+    }
+
+    if (state.quote) {
+      const end = closingQuote(text, i, state.quote);
+      if (end === -1) {
+        add("string", text.slice(i));
+        i = text.length;
+        break;
+      }
+      add("string", text.slice(i, end + 1));
+      i = end + 1;
+      state.quote = null;
+      continue;
+    }
+
+    if (cfg.block && text.startsWith(cfg.block[0], i)) {
+      const end = text.indexOf(cfg.block[1], i + cfg.block[0].length);
+      if (end === -1) {
+        add("comment", text.slice(i));
+        state.block = true;
+        i = text.length;
+        break;
+      }
+      add("comment", text.slice(i, end + cfg.block[1].length));
+      i = end + cfg.block[1].length;
+      continue;
+    }
+
+    const lineComment = (cfg.line ?? []).find(
+      (marker) => text.startsWith(marker, i) && (marker !== "#" || i === 0 || /[\s;([{,]/.test(text[i - 1]))
+    );
+    if (lineComment) {
+      add("comment", text.slice(i));
+      break;
+    }
+
+    if (cfg.css && text[i] === "@") {
+      const m = /^@[\w-]+/.exec(text.slice(i));
+      if (m) {
+        add("keyword", m[0]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    if (cfg.css && text[i] === "#") {
+      const m = /^#[0-9a-fA-F]{3,8}\b/.exec(text.slice(i));
+      if (m) {
+        add("number", m[0]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    if (cfg.quotes?.includes(text[i])) {
+      const quote = text[i];
+      const end = closingQuote(text, i + 1, quote);
+      const value = end === -1 ? text.slice(i) : text.slice(i, end + 1);
+      const after = end === -1 ? "" : text.slice(end + 1);
+      let kind = "string";
+      if (cfg.json && /^\s*:/.test(after)) kind = "property";
+      else if (cfg.html && /^\s*=/.test(after)) kind = "property";
+      add(kind, value);
+      if (end === -1 && quote === "`") state.quote = quote;
+      i = end === -1 ? text.length : end + 1;
+      continue;
+    }
+
+    if (/[0-9]/.test(text[i]) || (text[i] === "." && /[0-9]/.test(text[i + 1] ?? ""))) {
+      const m = /^(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:[a-zA-Z%]+)?/.exec(text.slice(i));
+      if (m) {
+        add("number", m[0]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    if (cfg.html && text[i] === "<") {
+      const m = /^<\/?([A-Za-z][\w:-]*)/.exec(text.slice(i));
+      if (m) {
+        add("punct", m[0].startsWith("</") ? "</" : "<");
+        add("type", m[1]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    cfg.id.lastIndex = i;
+    const id = cfg.id.exec(text);
+    if (id && id.index === i) {
+      const word = id[0];
+      i += word.length;
+      const after = text.slice(i);
+      const key = cfg.ci ? word.toLowerCase() : word;
+      let kind = "plain";
+
+      if (cfg.keywords?.has(key)) {
+        kind = "keyword";
+        if (["def", "function", "fn", "func"].includes(key)) pending = "function";
+        else if (["class", "struct", "enum", "interface", "trait", "type"].includes(key)) pending = "type";
+      } else if (pending === "function") {
+        kind = "function";
+        pending = null;
+      } else if (pending === "type") {
+        kind = "type";
+        pending = null;
+      } else if (cfg.css && after.startsWith("(")) {
+        kind = "function";
+      } else if (cfg.css && word.startsWith("--")) {
+        kind = "property";
+      } else if (cfg.html && /^\s*=/.test(after)) {
+        kind = "property";
+      } else if (cfg.json && /^\s*:/.test(after)) {
+        kind = "property";
+      } else if (/^[A-Z][A-Za-z0-9_$]*$/.test(word) && (language === "js" || language === "rs")) {
+        kind = "type";
+      }
+
+      add(kind, word);
+      continue;
+    }
+
+    add("plain", text[i]);
+    i++;
+  }
+
+  return spans;
+}
+
+/**
+ * Adds syntax spans to parsed diff rows. Removed and added lines are tokenized
+ * against separate states so a `/*` opened on one side does not bleed into the
+ * other; context lines advance both.
+ *
+ * @param {Array<any>} rows
+ * @param {string} path
+ */
+export function highlightRows(rows, path) {
+  const language = languageOf(path);
+  const oldState = /** @type {any} */ ({});
+  const newState = /** @type {any} */ ({});
+
+  return rows.map((row) => {
+    if (row.kind === "@" || row.kind === "\\") return row;
+    if (row.kind === "-") {
+      return { ...row, spans: tokenizeLine(row.text, language, oldState) };
+    }
+    const spans = tokenizeLine(row.text, language, newState);
+    if (row.kind === " ") {
+      oldState.block = newState.block;
+      oldState.quote = newState.quote;
+    }
+    return { ...row, spans };
+  });
+}
+
+// --- Side-by-side layouts and intra-line change highlighting -------------
+//
+// A unified diff only says that a line was replaced; it does not say which
+// characters of the two lines differ. Both the inline and the split view want
+// that information, so it is computed once per changed line pair while the
+// rows are paired into columns.
+
+const CHAR_DIFF_LIMIT = 200000;
+const TOKEN_DIFF_LIMIT = 200000;
+
+const WORD_CHAR = /[\p{L}\p{N}_$]/u;
+const SPACE_CHAR = /\s/u;
+
+/** UTF-16 offsets of every code point in `chars`, plus the end offset. */
+function codePointOffsets(chars) {
+  const offsets = new Array(chars.length + 1);
+  let offset = 0;
+  for (let i = 0; i < chars.length; i++) {
+    offsets[i] = offset;
+    offset += chars[i].length;
+  }
+  offsets[chars.length] = offset;
+  return offsets;
+}
+
+/** Appends a changed code-point range, merging it with the previous one when adjacent. */
+function pushRange(ranges, start, end) {
+  if (end <= start) return;
+  const last = ranges[ranges.length - 1];
+  if (last && last[1] >= start) {
+    last[1] = Math.max(last[1], end);
+  } else {
+    ranges.push([start, end]);
+  }
+}
+
+/** Splits a code-point slice into identifier, whitespace and single-punctuation tokens. */
+function tokenizeCodePoints(chars, start, end) {
+  const tokens = [];
+  let i = start;
+  while (i < end) {
+    const ch = chars[i];
+    let j = i + 1;
+    if (WORD_CHAR.test(ch)) {
+      while (j < end && WORD_CHAR.test(chars[j])) j++;
+    } else if (SPACE_CHAR.test(ch)) {
+      while (j < end && SPACE_CHAR.test(chars[j])) j++;
+    }
+    tokens.push({ start: i, end: j, text: chars.slice(i, j).join("") });
+    i = j;
+  }
+  return tokens;
+}
+
+/**
+ * Finds the unmatched code points in two aligned character ranges.
+ *
+ * The common prefix and suffix are dropped first, which keeps the quadratic
+ * part small on ordinary edits. The remainder is diffed character by character
+ * when it is small enough; a very large rewrite is marked whole rather than
+ * spending the frame on an LCS table.
+ */
+function charDiffRanges(A, B, aStart, aEnd, bStart, bEnd, outA, outB) {
+  while (aStart < aEnd && bStart < bEnd && A[aStart] === B[bStart]) {
+    aStart++;
+    bStart++;
+  }
+  while (aEnd > aStart && bEnd > bStart && A[aEnd - 1] === B[bEnd - 1]) {
+    aEnd--;
+    bEnd--;
+  }
+  if (aStart === aEnd && bStart === bEnd) return;
+  if (aStart === aEnd) {
+    pushRange(outB, bStart, bEnd);
+    return;
+  }
+  if (bStart === bEnd) {
+    pushRange(outA, aStart, aEnd);
+    return;
+  }
+
+  const m = aEnd - aStart;
+  const n = bEnd - bStart;
+  if (m * n > CHAR_DIFF_LIMIT) {
+    pushRange(outA, aStart, aEnd);
+    pushRange(outB, bStart, bEnd);
+    return;
+  }
+
+  const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    const row = dp[i];
+    const next = dp[i + 1];
+    const ch = A[aStart + i];
+    for (let j = n - 1; j >= 0; j--) {
+      row[j] = ch === B[bStart + j] ? next[j + 1] + 1 : Math.max(next[j], row[j + 1]);
+    }
+  }
+
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (A[aStart + i] === B[bStart + j]) {
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      pushRange(outA, aStart + i, aStart + i + 1);
+      i++;
+    } else {
+      pushRange(outB, bStart + j, bStart + j + 1);
+      j++;
+    }
+  }
+  if (i < m) pushRange(outA, aStart + i, aEnd);
+  if (j < n) pushRange(outB, bStart + j, bEnd);
+}
+
+/** Merges changed ranges with a short unchanged gap, so a rewrite does not read as confetti. */
+function mergeCloseRanges(ranges, gap) {
+  if (ranges.length < 2) return;
+  const merged = [ranges[0]];
+  for (let i = 1; i < ranges.length; i++) {
+    const last = merged[merged.length - 1];
+    if (ranges[i][0] - last[1] <= gap) {
+      last[1] = Math.max(last[1], ranges[i][1]);
+    } else {
+      merged.push(ranges[i]);
+    }
+  }
+  ranges.length = 0;
+  ranges.push(...merged);
+}
+
+/** Number of code points covered by a range list. */
+function coveredLength(ranges) {
+  return ranges.reduce((total, [start, end]) => total + (end - start), 0);
+}
+
+/**
+ * Diffs two ranges word by word, then refines each changed word run character
+ * by character. Word matching keeps `updateScore` → `updateScores` down to the
+ * single `s`, while a completely rewritten expression is highlighted as a
+ * block instead of a handful of scattered letters.
+ */
+function tokenDiffRanges(A, B, aStart, aEnd, bStart, bEnd, outA, outB) {
+  while (aStart < aEnd && bStart < bEnd && A[aStart] === B[bStart]) {
+    aStart++;
+    bStart++;
+  }
+  while (aEnd > aStart && bEnd > bStart && A[aEnd - 1] === B[bEnd - 1]) {
+    aEnd--;
+    bEnd--;
+  }
+  if (aStart === aEnd && bStart === bEnd) return;
+  if (aStart === aEnd) {
+    pushRange(outB, bStart, bEnd);
+    return;
+  }
+  if (bStart === bEnd) {
+    pushRange(outA, aStart, aEnd);
+    return;
+  }
+
+  const middleAStart = aStart;
+  const middleBStart = bStart;
+  const middleAEnd = aEnd;
+  const middleBEnd = bEnd;
+  const ta = tokenizeCodePoints(A, aStart, aEnd);
+  const tb = tokenizeCodePoints(B, bStart, bEnd);
+  if (ta.length * tb.length > TOKEN_DIFF_LIMIT) {
+    charDiffRanges(A, B, aStart, aEnd, bStart, bEnd, outA, outB);
+    return;
+  }
+
+  const dp = Array.from({ length: ta.length + 1 }, () => new Uint16Array(tb.length + 1));
+  for (let i = ta.length - 1; i >= 0; i--) {
+    const row = dp[i];
+    const next = dp[i + 1];
+    const token = ta[i].text;
+    for (let j = tb.length - 1; j >= 0; j--) {
+      row[j] = token === tb[j].text ? next[j + 1] + 1 : Math.max(next[j], row[j + 1]);
+    }
+  }
+
+  /** @type {Array<[number, number]>} */
+  const matches = [];
+  let i = 0;
+  let j = 0;
+  while (i < ta.length && j < tb.length) {
+    if (ta[i].text === tb[j].text) {
+      matches.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+
+  let ai = 0;
+  let bi = 0;
+  for (const [ma, mb] of [...matches, [ta.length, tb.length]]) {
+    const as = ai < ta.length ? ta[ai].start : aEnd;
+    const ae = ma < ta.length ? ta[ma].start : aEnd;
+    const bs = bi < tb.length ? tb[bi].start : bEnd;
+    const be = mb < tb.length ? tb[mb].start : bEnd;
+    charDiffRanges(A, B, as, ae, bs, be, outA, outB);
+    ai = ma + 1;
+    bi = mb + 1;
+  }
+
+  // A rewritten identifier or expression can produce a spray of one-letter
+  // ranges. Bridging one- and two-character gaps turns those back into readable
+  // blocks, and when most of the line changed the whole middle is clearer than
+  // any refinement.
+  mergeCloseRanges(outA, 2);
+  mergeCloseRanges(outB, 2);
+  const changedA = coveredLength(outA);
+  const changedB = coveredLength(outB);
+  const totalA = middleAEnd - middleAStart;
+  const totalB = middleBEnd - middleBStart;
+  if (
+    outA.length + outB.length >= 4 &&
+    ((totalA > 0 && changedA >= totalA * 0.6) || (totalB > 0 && changedB >= totalB * 0.6))
+  ) {
+    outA.length = 0;
+    outB.length = 0;
+    pushRange(outA, middleAStart, middleAEnd);
+    pushRange(outB, middleBStart, middleBEnd);
+  }
+}
+
+/**
+ * The character ranges that differ between two lines.
+ *
+ * Returns half-open UTF-16 ranges for each side, ready to be laid over the
+ * syntax spans of the line. Identical lines give empty ranges.
+ *
+ * @param {string} oldText
+ * @param {string} newText
+ * @returns {{ old: Array<[number, number]>, new: Array<[number, number]> }}
+ */
+export function intraLineDiff(oldText, newText) {
+  const A = Array.from(oldText ?? "");
+  const B = Array.from(newText ?? "");
+  /** @type {Array<[number, number]>} */
+  const outA = [];
+  /** @type {Array<[number, number]>} */
+  const outB = [];
+  tokenDiffRanges(A, B, 0, A.length, 0, B.length, outA, outB);
+
+  const offsetsA = codePointOffsets(A);
+  const offsetsB = codePointOffsets(B);
+  return {
+    old: outA.map(([start, end]) => [offsetsA[start], offsetsA[end]]),
+    new: outB.map(([start, end]) => [offsetsB[start], offsetsB[end]]),
+  };
+}
+
+/** One cell of a side-by-side row (or of the inline row, reused as-is). */
+function diffCell(row, side) {
+  return {
+    kind: row.kind,
+    num: side === "old" ? row.oldNum ?? null : row.newNum ?? null,
+    text: row.text ?? "",
+    spans: row.spans ?? [],
+    changes: row.changes ?? [],
+  };
+}
+
+/**
+ * Builds the three presentations of one diff from the highlighted unified rows:
+ * the inline rows (with intra-line ranges attached) and the two aligned columns
+ * of the split layout. Both columns always have the same length, so the two
+ * virtual lists stay in lockstep; an unmatched line leaves a filler cell on the
+ * other side.
+ *
+ * @param {Array<any>} rows
+ * @returns {{ inline: Array<any>, left: Array<any>, right: Array<any> }}
+ */
+export function buildDiffView(rows) {
+  /** @type {Array<any>} */
+  const inline = [];
+  /** @type {Array<any>} */
+  const left = [];
+  /** @type {Array<any>} */
+  const right = [];
+
+  const addMarker = (row) => {
+    inline.push(row);
+    left.push({ kind: row.kind, text: row.text ?? "" });
+    // File-level markers and hunk headers are drawn once, across both columns;
+    // the new column keeps the row (so the lists stay aligned) but no text.
+    right.push({ kind: row.kind, text: "" });
+  };
+
+  let i = 0;
+  while (i < rows.length) {
+    const row = rows[i];
+
+    if (row.kind === "-") {
+      /** @type {Array<any>} */
+      const dels = [];
+      while (i < rows.length && rows[i].kind === "-") dels.push(rows[i++]);
+      /** @type {Array<any>} */
+      const adds = [];
+      while (i < rows.length && rows[i].kind === "+") adds.push(rows[i++]);
+
+      const pairs = Math.max(dels.length, adds.length);
+      for (let k = 0; k < pairs; k++) {
+        const del = dels[k] ?? null;
+        const add = adds[k] ?? null;
+        if (del && add) {
+          const changes = intraLineDiff(del.text, add.text);
+          del.changes = changes.old;
+          add.changes = changes.new;
+        }
+        left.push({
+          kind: "pair",
+          left: del ? diffCell(del, "old") : null,
+          right: add ? diffCell(add, "new") : null,
+        });
+        // The two columns are built in lockstep; the row above already carries
+        // both cells, so `right` mirrors it rather than holding its own copy.
+        right.push(left[left.length - 1]);
+      }
+
+      for (const del of dels) inline.push(del);
+      for (const add of adds) inline.push(add);
+      continue;
+    }
+
+    if (row.kind === "+") {
+      while (i < rows.length && rows[i].kind === "+") {
+        const add = rows[i++];
+        inline.push(add);
+        const splitRow = { kind: "pair", left: null, right: diffCell(add, "new") };
+        left.push(splitRow);
+        right.push(splitRow);
+      }
+      continue;
+    }
+
+    if (row.kind === " ") {
+      i++;
+      inline.push(row);
+      const splitRow = { kind: "pair", left: diffCell(row, "old"), right: diffCell(row, "new") };
+      left.push(splitRow);
+      right.push(splitRow);
+      continue;
+    }
+
+    i++;
+    addMarker(row);
+  }
+
+  return { inline, left, right };
+}
+
+/**
+ * Splits one syntax highlighter span list into drawable segments, marking the
+ * segments that fall inside an intra-line change range. Adjacent segments with
+ * the same token kind and change flag are merged so a row is a handful of spans
+ * rather than one per character.
+ *
+ * @param {Array<{ text: string, kind: string }>} spans
+ * @param {Array<[number, number]>} changes
+ * @returns {Array<{ text: string, kind: string, changed: boolean }>}
+ */
+export function lineSegments(spans, changes) {
+  const source = spans?.length ? spans : [{ text: " ", kind: "plain" }];
+  const ranges = changes ?? [];
+  /** @type {Array<{ text: string, kind: string, changed: boolean }>} */
+  const out = [];
+  let position = 0;
+  let rangeIndex = 0;
+
+  for (const span of source) {
+    const spanStart = position;
+    const spanEnd = position + span.text.length;
+    let i = spanStart;
+
+    while (i < spanEnd) {
+      while (rangeIndex < ranges.length && ranges[rangeIndex][1] <= i) rangeIndex++;
+      const changed = rangeIndex < ranges.length && ranges[rangeIndex][0] <= i;
+      let next = spanEnd;
+      if (changed) {
+        next = Math.min(spanEnd, ranges[rangeIndex][1]);
+      } else if (rangeIndex < ranges.length && ranges[rangeIndex][0] < spanEnd) {
+        next = ranges[rangeIndex][0];
+      }
+      if (next <= i) next = spanEnd;
+
+      const text = span.text.slice(i - spanStart, next - spanStart);
+      if (text) {
+        const last = out[out.length - 1];
+        if (last && last.kind === span.kind && last.changed === changed) {
+          last.text += text;
+        } else {
+          out.push({ text, kind: span.kind, changed });
+        }
+      }
+      i = next;
+    }
+
+    position = spanEnd;
+  }
+
+  return out;
+}
