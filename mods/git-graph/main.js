@@ -1438,6 +1438,84 @@ export default class GitGraph extends View {
     return this.remotes.includes("origin") ? "origin" : this.remotes[0] || null;
   }
 
+  /** Repository name suggested for a new GitHub repo: the folder name, sanitized. */
+  suggestRepoName() {
+    const root = (this.root || "").replace(/[\\/]+$/, "");
+    const base = root.split(/[\\/]/).pop() || "repository";
+    const cleaned = base
+      .replace(/\s+/g, "-")
+      .replace(/[^A-Za-z0-9._-]/g, "-")
+      .replace(/-{2,}/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "");
+    return cleaned || "repository";
+  }
+
+  /**
+   * Push requested with no remotes: publish the repository to GitHub instead.
+   * `gh` must exist and be authenticated; the create form opens only then.
+   */
+  startPublishFlow(cx) {
+    if (!this.root || this.busy || this.remoteAction) return;
+    const root = this.root;
+    const on = this.on;
+    this.busy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      // The toolbar can render before the first refresh finishes; confirm with
+      // git before offering to create a repository that may already exist.
+      let remotes = [];
+      try {
+        const remotesRes = await exec("git", [...READ, "remote"], { cwd: root, on });
+        if (remotesRes.code === 0) {
+          remotes = remotesRes.stdout
+            .split("\n")
+            .map((r) => r.trim())
+            .filter(Boolean);
+        }
+      } catch {
+        // Git failed unexpectedly; fall through to the GitHub CLI check.
+      }
+
+      let auth = null;
+      let available = false;
+      if (!remotes.length) {
+        try {
+          auth = await exec("gh", ["auth", "status"], { cwd: root, on });
+          available = true;
+        } catch {
+          // `gh` is not installed (or cannot start on this machine).
+        }
+      }
+
+      this.busy = false;
+      if (remotes.length) {
+        this.remotes = remotes;
+        this.runRemoteAction("push", cx);
+        return;
+      }
+      if (!available) {
+        notify({
+          title: "GitHub CLI not found",
+          body: "Install gh (https://cli.github.com) to publish this repository, or add a remote manually.",
+          level: "error",
+        });
+        cx.notify();
+        return;
+      }
+      if (auth.code !== 0) {
+        notify({
+          title: "Not signed in to GitHub",
+          body: 'Run "gh auth login" in a terminal, then push again.',
+          level: "error",
+        });
+        cx.notify();
+        return;
+      }
+      const account = /account\s+(\S+)/i.exec(`${auth.stdout}\n${auth.stderr}`)?.[1] || null;
+      this.openModal("publish", { account }, cx);
+    });
+  }
+
   /** Runs `git fetch`, `git pull` or `git push` for the current repository. */
   runRemoteAction(kind, cx) {
     if (!this.root || this.busy || this.remoteAction) return;
@@ -1449,16 +1527,20 @@ export default class GitGraph extends View {
       });
       return;
     }
-    if ((kind === "fetch" || kind === "push") && !this.remotes.length) {
-      notify({ title: "No remote", body: "Add a git remote before fetching or pushing.", level: "error" });
-      return;
-    }
     if (kind === "push" && !this.hasHead) {
       notify({ title: "Nothing to push", body: "This repository has no commits yet.", level: "error" });
       return;
     }
     if (kind === "push" && this.detached) {
       notify({ title: "Cannot push", body: "HEAD is detached. Check out a branch first.", level: "error" });
+      return;
+    }
+    if (kind === "fetch" && !this.remotes.length) {
+      notify({ title: "No remote", body: "Add a git remote before fetching.", level: "error" });
+      return;
+    }
+    if (kind === "push" && !this.remotes.length) {
+      this.startPublishFlow(cx);
       return;
     }
 
@@ -1719,6 +1801,16 @@ export default class GitGraph extends View {
     }
   }
 
+  /** Focus a modal input now and again over the next few frames. */
+  focusModalInput(cx) {
+    this.modalInput?.focus();
+    if (cx?.timer?.after) {
+      cx.timer.after(60, () => this.modalInput?.focus());
+      cx.timer.after(180, () => this.modalInput?.focus());
+      cx.timer.after(500, () => this.modalInput?.focus());
+    }
+  }
+
   openModal(type, target, cx) {
     this.closeContextMenu();
     if (type === "branch") {
@@ -1731,12 +1823,7 @@ export default class GitGraph extends View {
         cx.notify();
       });
       this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
-      this.modalInput.focus();
-      if (cx?.timer?.after) {
-        cx.timer.after(60, () => this.modalInput?.focus());
-        cx.timer.after(180, () => this.modalInput?.focus());
-        cx.timer.after(500, () => this.modalInput?.focus());
-      }
+      this.focusModalInput(cx);
     } else if (type === "tag") {
       this.modalDialog = { type, commit: target, error: null };
       this.modalInput = InputState.new({ placeholder: "Tag name (e.g. v1.0.0)" });
@@ -1748,12 +1835,24 @@ export default class GitGraph extends View {
         cx.notify();
       });
       this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
-      this.modalInput.focus();
-      if (cx?.timer?.after) {
-        cx.timer.after(60, () => this.modalInput?.focus());
-        cx.timer.after(180, () => this.modalInput?.focus());
-        cx.timer.after(500, () => this.modalInput?.focus());
-      }
+      this.focusModalInput(cx);
+    } else if (type === "publish") {
+      const suggested = this.suggestRepoName();
+      this.modalDialog = {
+        type,
+        visibility: "private",
+        account: target?.account || null,
+        error: null,
+      };
+      this.modalInput = InputState.new({ placeholder: "Repository name", value: suggested });
+      this.modalInput.on("change", (_e, cx) => {
+        if (this.modalDialog?.error) {
+          this.modalDialog.error = null;
+        }
+        cx.notify();
+      });
+      this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
+      this.focusModalInput(cx);
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
@@ -1781,23 +1880,35 @@ export default class GitGraph extends View {
     const { type, commit, ref } = dialog;
     const root = this.root;
     const on = this.on;
+    const branchName = this.currentBranch;
 
     // The handler's Context is valid only until it returns, so the name is
     // read and checked synchronously; everything after the first await runs
     // in a spawned task with an AsyncContext.
     let name = null;
-    if (type === "branch" || type === "tag") {
+    if (type === "branch" || type === "tag" || type === "publish") {
       name = this.modalInput?.value().trim();
+      const what = type === "branch" ? "Branch" : type === "tag" ? "Tag" : "Repository";
       if (!name) {
-        dialog.error = `${type === "branch" ? "Branch" : "Tag"} name cannot be empty`;
+        dialog.error = `${what} name cannot be empty`;
         cx.notify();
         return;
       }
       if (name.startsWith("-") || name.startsWith("/")) {
-        dialog.error = `${type === "branch" ? "Branch" : "Tag"} name cannot start with '-' or '/'`;
+        dialog.error = `${what} name cannot start with '-' or '/'`;
         cx.notify();
         return;
       }
+      if (type === "publish" && !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?$/.test(name)) {
+        dialog.error = "Use letters, digits, dots, dashes, underscores, or owner/name";
+        cx.notify();
+        return;
+      }
+    }
+    if (type === "publish" && (!this.hasHead || this.detached)) {
+      dialog.error = this.hasHead ? "Cannot push from a detached HEAD" : "This repository has no commits yet";
+      cx.notify();
+      return;
     }
 
     this.busy = true;
@@ -1842,6 +1953,48 @@ export default class GitGraph extends View {
           } else {
             fail((r.stderr || r.stdout).trim() || "Failed to add tag");
           }
+        } else if (type === "publish") {
+          const visibility = dialog.visibility === "public" ? "--public" : "--private";
+          const create = await exec(
+            "gh",
+            ["repo", "create", name, "--source", root, "--remote", "origin", visibility],
+            { cwd: root, on }
+          );
+          if (create.code !== 0) {
+            const detail = (create.stderr || create.stdout).trim();
+            fail(detail.length > 800 ? `${detail.slice(0, 800)}…` : detail || "gh repo create failed");
+            return;
+          }
+
+          const url =
+            create.stdout
+              .split("\n")
+              .map((line) => line.trim())
+              .find((line) => line.startsWith("http")) || null;
+          this.remotes = ["origin"];
+          const push = await exec(
+            "git",
+            [...NETWORK, "push", "--set-upstream", "--end-of-options", "origin", branchName],
+            { cwd: root, on }
+          );
+          if (push.code !== 0) {
+            this.closeModal(cx);
+            notify({
+              title: "Repository created, push failed",
+              body: (push.stderr || push.stdout).trim().slice(0, 600) || "git push failed",
+              level: "error",
+            });
+            this.refresh(cx);
+            return;
+          }
+          this.closeModal(cx);
+          notify({
+            title: "Published to GitHub",
+            body: `Created ${url || name} and pushed '${branchName}'.`,
+            level: "success",
+            timeout: url ? 6000 : 2500,
+          });
+          this.refresh(cx);
         } else if (type === "reset") {
           const mode = dialog.resetMode || "mixed";
           const r = await exec("git", [...NON_INTERACTIVE, "reset", `--${mode}`, "--end-of-options", commit.hash], { cwd: root, on });
@@ -3279,7 +3432,7 @@ export default class GitGraph extends View {
     const running = this.remoteAction === kind;
     const anotherRunning = Boolean(this.remoteAction) && !running;
     const needsUpstream = kind === "pull" && !this.upstream;
-    const needsRemote = (kind === "fetch" || kind === "push") && !this.remotes.length;
+    const needsRemote = kind === "fetch" && !this.remotes.length;
     const cannotPush = kind === "push" && (!this.hasHead || this.detached);
     const operationLocked = kind !== "fetch" && Boolean(this.inProgressOp);
     const disabled =
@@ -3302,6 +3455,8 @@ export default class GitGraph extends View {
       tip = "Fetch all remotes (git fetch --all --prune)";
     } else if (kind === "pull") {
       tip = `Pull from ${this.upstream}${this.behind > 0 ? ` · ${this.behind} behind` : ""}`;
+    } else if (!this.remotes.length) {
+      tip = "Publish to GitHub: create a repository and push this branch";
     } else if (this.upstream) {
       tip = `Push to ${this.upstream}${this.ahead > 0 ? ` · ${this.ahead} ahead` : ""}`;
     } else {
@@ -3856,6 +4011,35 @@ export default class GitGraph extends View {
       );
   }
 
+  /** One private/public choice in the publish-to-GitHub modal. */
+  publishVisibilityOption(value, label, hint, t, cx) {
+    const selected = this.modalDialog?.visibility === value;
+    return v_flex()
+      .id(`publish-visibility-${value}`)
+      .flex_1()
+      .gap(2)
+      .px(8)
+      .py(6)
+      .rounded(6)
+      .border_1()
+      .border_color(color(selected ? t.accent : t.border))
+      .bg(color(selected ? t.selected : t.background))
+      .cursor_pointer()
+      .hover((s) => s.bg(color(selected ? t.selected : t.hover)))
+      .on_click((_e, cx) => {
+        if (this.modalDialog) this.modalDialog.visibility = value;
+        cx.notify();
+      })
+      .child(
+        div()
+          .font_semibold()
+          .text_size(11)
+          .text_color(color(selected ? t.foreground : t.dim))
+          .child(label)
+      )
+      .child(div().text_size(9.5).text_color(color(t.muted)).child(hint));
+  }
+
   renderModalDialog(t, cx) {
     const dialog = this.modalDialog;
     if (!dialog) return null;
@@ -3896,7 +4080,9 @@ export default class GitGraph extends View {
                   .text_size(13)
                   .text_color(color(t.foreground))
                   .child(
-                    dialog.type === "branch"
+                    dialog.type === "publish"
+                      ? "Publish to GitHub"
+                      : dialog.type === "branch"
                       ? `Create Branch at ${commit.shortHash}`
                       : dialog.type === "tag"
                       ? `Add Tag at ${commit.shortHash}`
@@ -3922,7 +4108,9 @@ export default class GitGraph extends View {
                   .text_size(11)
                   .text_color(color(t.muted))
                   .child(
-                    dialog.type === "branch"
+                    dialog.type === "publish"
+                      ? `Create a new GitHub repository${dialog.account ? ` as @${dialog.account}` : ""} and push '${this.currentBranch}'`
+                      : dialog.type === "branch"
                       ? `Create a new branch pointing to commit ${commit.shortHash}`
                       : dialog.type === "tag"
                       ? `Create a tag at commit ${commit.shortHash} (annotated if message is provided)`
@@ -4062,6 +4250,54 @@ export default class GitGraph extends View {
                   .text_color(color(t.foreground))
               )
           )
+          // Publish inputs: repository name + visibility
+          .when(dialog.type === "publish", (e) =>
+            e.child(
+              v_flex()
+                .gap(8)
+                .child(
+                  v_flex()
+                    .gap(4)
+                    .child(div().text_size(10.5).text_color(color(t.muted)).child("Repository name"))
+                    .child(
+                      Input.new(this.modalInput)
+                        .id("modal-publish-name-input")
+                        .h(32)
+                        .w_full()
+                        .px(8)
+                        .rounded(6)
+                        .border_1()
+                        .border_color(color(t.border))
+                        .bg(color(t.background))
+                        .text_size(12)
+                        .text_color(color(t.foreground))
+                    )
+                    .child(
+                      div()
+                        .text_size(10)
+                        .text_color(color(t.muted))
+                        .child("Suggested from the folder name. Letters, digits, dots, dashes, underscores, and owner/name are allowed.")
+                    )
+                )
+                .child(
+                  v_flex()
+                    .gap(4)
+                    .child(div().text_size(10.5).text_color(color(t.muted)).child("Visibility"))
+                    .child(
+                      h_flex()
+                        .gap(6)
+                        .child(this.publishVisibilityOption("private", "Private", "Only you can see it", t, cx))
+                        .child(this.publishVisibilityOption("public", "Public", "Anyone can see it", t, cx))
+                    )
+                )
+                .child(
+                  div()
+                    .text_size(10)
+                    .text_color(color(t.muted))
+                    .child("Creates the repository with gh, then pushes this branch and sets its upstream.")
+                )
+            )
+          )
           // Reset options
           .when(dialog.type === "reset", (e) =>
             e.child(
@@ -4191,7 +4427,11 @@ export default class GitGraph extends View {
                   .on_click((_e, cx) => this.submitModal(cx))
                   .child(
                     this.busy
-                      ? "Working…"
+                      ? dialog.type === "publish"
+                        ? "Publishing…"
+                        : "Working…"
+                      : dialog.type === "publish"
+                      ? "Create & Push"
                       : dialog.type === "branch"
                       ? "Create Branch"
                       : dialog.type === "tag"

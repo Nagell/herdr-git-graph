@@ -51,8 +51,10 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - Right-clicking any branch badge opens a dedicated ref context menu: **Checkout Branch**, **Delete Branch...** (with safe/force delete confirmation), and **Copy Branch Name**.
 - **One-Click Fetch / Pull / Push**:
   - Three icon buttons sit next to the branch selector: **Fetch** (`git fetch --all --prune`), **Pull** (`git pull --no-edit`), and **Push** (sets the upstream automatically when the branch has none).
+  - With no remote configured, **Push** turns into **Publish to GitHub**: after `gh auth status` confirms a login, a modal asks for the repository name (prefilled from the folder name, sanitized) and Private / Public visibility, then runs `gh repo create <name> --source <root> --remote origin --private|--public` followed by `git push --set-upstream origin <branch>`.
+  - A missing `gh` binary or an unauthenticated CLI produces an actionable toast instead of silently disabling the button.
   - The selector shows ahead/behind counts (`↑n` / `↓n`) and the dropdown shows the tracked upstream. Tooltips state the exact command and target.
-  - Buttons disable themselves with no remote, no upstream (pull), a detached HEAD (push), an in-progress merge/rebase/cherry-pick, or while another git operation is running.
+  - Fetch disables without a remote; Pull needs an upstream, Push needs a commit and a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.
   - Remote commands run with `credential.interactive=false` and an HTTP low-speed cutoff so a missing prompt or stalled transfer fails loudly instead of hanging the toolbar.
 - **Background Tree Cleanup Agent**:
   - An OpenCode icon button beside the branch controls (and a matching action in the branch dropdown when the tree is dirty) starts **OpenCode Mini** in a background Herdr terminal with `hc run --bg --keep`.

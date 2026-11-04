@@ -32,7 +32,9 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Toolbar **Fetch**, **Pull**, and **Push** buttons beside the branch selector, each with a tooltip naming the exact command and target upstream.
   - The branch selector shows ahead/behind counts (`↑n` / `↓n`); the dropdown reports the tracked upstream.
   - **Push** sets the upstream automatically when the branch does not have one yet.
-  - Actions disable themselves with no remote, no upstream (pull), a detached HEAD (push), or while a merge/rebase/cherry-pick is in progress.
+  - With no remote configured, **Push** publishes the repository to GitHub: it checks `gh auth status`, then asks for a repository name (prefilled from the folder name) and Private / Public visibility before creating the repo and pushing.
+  - A missing or unauthenticated GitHub CLI reports what to install or run instead of disabling Push.
+  - Fetch disables without a remote; Pull needs an upstream, Push needs a commit on a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.
 - **Background Tree Cleanup Agent**:
   - A one-click OpenCode button beside the branch controls (also available from the branch dropdown when dirty) starts **OpenCode Mini** in a background Herdr terminal.
   - It uses the low-reasoning `opencode-go/deepseek-v4.1-flash#low` variant and receives the current branch, dirty paths, and any in-progress operation in its first message.
