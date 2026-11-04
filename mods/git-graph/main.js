@@ -3718,6 +3718,7 @@ export default class GitGraph extends View {
           .child(
             h_flex()
               .id("branch-filter-all")
+              .flex_none()
               .h(26)
               .px(8)
               .gap(6)
@@ -3734,6 +3735,7 @@ export default class GitGraph extends View {
           .child(
             h_flex()
               .id("branch-filter-current")
+              .flex_none()
               .h(26)
               .px(8)
               .gap(6)
@@ -3751,6 +3753,7 @@ export default class GitGraph extends View {
             e.child(
               h_flex()
                 .id("branch-upstream-status")
+                .flex_none()
                 .h(22)
                 .px(8)
                 .gap(6)
@@ -3770,13 +3773,14 @@ export default class GitGraph extends View {
           // Specific branches list
           .when(this.availableBranches.length > 0, (e) =>
             e
-              .child(div().h(1).bg(color(t.border)).my(3))
-              .child(div().px(8).py(2).text_size(10).text_color(color(t.muted)).child("BRANCHES"))
+              .child(div().flex_none().h(1).bg(color(t.border)).my(3))
+              .child(div().flex_none().px(8).py(2).text_size(10).text_color(color(t.muted)).child("BRANCHES"))
               .children(
                 this.availableBranches.map((bName) => {
                   const isActive = this.branchFilter === bName;
                   return h_flex()
                     .id(`branch-item-${bName}`)
+                    .flex_none()
                     .h(24)
                     .px(8)
                     .gap(6)
@@ -3796,7 +3800,70 @@ export default class GitGraph extends View {
                 })
               )
           )
-          // Background cleanup agent action
+          // Stash actions stay reachable after the dirty row disappears.
+          .when(this.workingTreeFiles.length > 0 || this.stashes.length > 0, (e) =>
+            e
+              .child(div().flex_none().h(1).bg(color(t.border)).my(3))
+              .when(this.workingTreeFiles.length > 0, (el) =>
+                el.child(
+                  h_flex()
+                    .id("branch-stash-changes")
+                    .flex_none()
+                    .h(26)
+                    .px(8)
+                    .gap(6)
+                    .items_center()
+                    .rounded(5)
+                    .cursor_pointer()
+                    .hover((s) => s.bg(color(t.hover)))
+                    .on_click((_e, cx) => {
+                      this.branchDropdownOpen = false;
+                      this.openModal("stash", { staged: false }, cx);
+                    })
+                    .child(svg("mods/git-graph/icons/stash.svg").size(12).text_color(color(t.dim)))
+                    .child(div().flex_1().truncate().child("Stash changes…"))
+                    .child(
+                      div()
+                        .text_size(9)
+                        .text_color(color(t.muted))
+                        .child(`${this.workingTreeFiles.length} file${this.workingTreeFiles.length === 1 ? "" : "s"}`)
+                    )
+                )
+              )
+              .when(this.stashes.length > 0, (el) =>
+                el
+                  .child(
+                    div()
+                      .flex_none()
+                      .px(8)
+                      .py(2)
+                      .text_size(10)
+                      .text_color(color(t.muted))
+                      .child(`STASHES (${this.stashes.length})`)
+                  )
+                  .children(
+                    this.stashes.map((st, index) =>
+                      h_flex()
+                        .id(`branch-stash-${index}`)
+                        .flex_none()
+                        .h(24)
+                        .px(8)
+                        .gap(6)
+                        .items_center()
+                        .rounded(5)
+                        .cursor_pointer()
+                        .hover((s) => s.bg(color(t.hover)))
+                        .on_click((_e, cx) => {
+                          this.branchDropdownOpen = false;
+                          this.openModal("unstash", st, cx);
+                        })
+                        .child(svg("mods/git-graph/icons/unstash.svg").size(11).text_color(color(t.dim)))
+                        .child(div().flex_1().truncate().child(st.subject))
+                        .child(div().text_size(9).text_color(color(t.muted)).child(st.ref))
+                    )
+                  )
+              )
+          )
           .when(Boolean(this.workingTreeFiles.length || this.inProgressOp || this.treeAgentBusy()), (e) =>
             e
               .child(div().h(1).bg(color(t.border)).my(3))
@@ -5351,11 +5418,14 @@ export default class GitGraph extends View {
               .when(isCompact, (e) => e.flex_1().min_w(0))
               .hover((s) => s.bg(color(t.hover)))
               .tooltip(
-                this.upstream
+                (this.upstream
                   ? `${branchLabel} · tracking ${this.upstream}${
                       this.ahead > 0 ? ` · ${this.ahead} ahead` : ""
                     }${this.behind > 0 ? ` · ${this.behind} behind` : ""}`
-                  : `${branchLabel} · no upstream`
+                  : `${branchLabel} · no upstream`) +
+                  (this.stashes.length
+                    ? ` · ${this.stashes.length} stash${this.stashes.length === 1 ? "" : "es"}`
+                    : "")
               )
               .on_click((_e, cx) => {
                 this.branchDropdownOpen = !this.branchDropdownOpen;
@@ -5374,6 +5444,15 @@ export default class GitGraph extends View {
               )
               .when(!isCompact && this.behind > 0, (e) =>
                 e.child(div().text_size(10).text_color(color(t.ansi1)).child(`↓${this.behind}`))
+              )
+              .when(!isCompact && this.stashes.length > 0, (e) =>
+                e.child(
+                  h_flex()
+                    .gap(2)
+                    .items_center()
+                    .child(svg("mods/git-graph/icons/stash.svg").size(10).text_color(color(t.ansi3 || t.dim)))
+                    .child(div().text_size(9).text_color(color(t.muted)).child(`${this.stashes.length}`))
+                )
               )
               .child(svg("mods/git-graph/icons/chevron-down.svg").size(10).text_color(color(t.dim)))
           )
