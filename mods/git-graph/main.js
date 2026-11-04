@@ -317,11 +317,17 @@ export default class GitGraph extends View {
     this.manualRoot = null;
 
     this.branchDropdownOpen = false;
-    this.contextMenu = null; // { type: 'commit' | 'branch', commit?, ref?, x: number, y: number }
+    this.contextMenu = null; // { type: 'commit' | 'branch' | 'stash' | 'working-tree', commit?, ref?, x: number, y: number }
     this.modalDialog = null; // { type: string, commit?: any, ref?: any, resetMode?: string, ... }
     this.modalInput = null;
     this.modalTagMessageInput = null;
     this.inProgressOp = null; // { type: string, conflicts: number }
+
+    // Saved stashes. Each one becomes a dedicated graph row above the working
+    // tree instead of leaking Git's internal WIP/index/untracked commits.
+    this.stashes = []; // [{ ref, hash, baseHash, subject, author, email, timestamp }]
+    this.stashNodes = []; // pseudo-commits rendered in the table
+    this.stagedCount = 0;
 
     // Remote tracking state for the fetch / pull / push toolbar buttons.
     this.upstream = null; // e.g. "origin/main"
@@ -1066,6 +1072,41 @@ export default class GitGraph extends View {
     );
   }
 
+  /** Turns saved stashes into pseudo-commit rows for the table. */
+  buildStashNodes() {
+    const q = this.searchQuery;
+    return this.stashes
+      .map((st) => ({
+        hash: st.hash,
+        shortHash: st.hash.slice(0, 7),
+        isStash: true,
+        stashRef: st.ref,
+        stashHash: st.hash,
+        baseHash: st.baseHash,
+        parents: [],
+        subject: st.subject,
+        author: st.author,
+        email: st.email,
+        timestamp: st.timestamp,
+        refs: [{ kind: "stash", text: st.ref }],
+        // Standalone row: no lane edges into the DAG.
+        lane: 0,
+        colorIdx: 0,
+        edgesUp: [],
+        edgesDown: [],
+        parentConnections: [],
+        maxLaneAtRow: 0,
+      }))
+      .filter(
+        (node) =>
+          !q ||
+          "stash".includes(q) ||
+          "stashes".includes(q) ||
+          node.stashRef.toLowerCase().includes(q) ||
+          node.subject.toLowerCase().includes(q)
+      );
+  }
+
   applyFilter() {
     let matched = this.commits;
     if (this.searchQuery) {
@@ -1080,8 +1121,10 @@ export default class GitGraph extends View {
       );
     }
     this.filteredCommits = matched;
+    this.stashNodes = this.buildStashNodes();
 
     // Q4: If working tree is active, prepend virtual WT node with HEAD commit as parent
+    const laneItems = [];
     if (this.shouldShowWorkingTree()) {
       const headCommit = this.commits.find((c) => c.isHead);
       const headHash = headCommit ? headCommit.hash : (this.commits[0]?.hash ?? null);
@@ -1096,16 +1139,19 @@ export default class GitGraph extends View {
         shortHash: "Unsaved",
         refs: [],
       };
-      this.maxLane = computeLanes([this.workingTreeNode, ...matched]);
+      laneItems.push(this.workingTreeNode);
     } else {
       this.workingTreeNode = null;
-      this.maxLane = computeLanes(matched);
     }
+    this.maxLane = computeLanes([...laneItems, ...matched]);
   }
 
   getVisibleItems() {
     /** @type {Array<any>} */
     const items = [];
+    for (const stash of this.stashNodes) {
+      items.push(stash);
+    }
     if (this.shouldShowWorkingTree() && this.workingTreeNode) {
       items.push(this.workingTreeNode);
     }
@@ -1148,6 +1194,9 @@ export default class GitGraph extends View {
           this.ahead = 0;
           this.behind = 0;
           this.detached = false;
+          this.stashes = [];
+          this.stashNodes = [];
+          this.stagedCount = 0;
           return;
         }
         const root = top.stdout.trim();
@@ -1168,6 +1217,9 @@ export default class GitGraph extends View {
           this.ahead = 0;
           this.behind = 0;
           this.detached = false;
+          this.stashes = [];
+          this.stashNodes = [];
+          this.stagedCount = 0;
         }
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
 
@@ -1234,8 +1286,35 @@ export default class GitGraph extends View {
           }
         }
 
+        // Stash entries become their own rows. `%gs` is the reflog subject
+        // (the custom message, or "WIP on <branch>: …").
+        const stashRes = await git([
+          "stash",
+          "list",
+          "--format=%gd%x1f%H%x1f%P%x1f%gs%x1f%at%x1f%an%x1f%ae",
+        ]);
+        const stashes = [];
+        if (stashRes.code === 0 && stashRes.stdout) {
+          for (const line of stashRes.stdout.split("\n")) {
+            if (!line) continue;
+            const [ref, hash, parentStr, subject, at, author, email] = line.split("\x1f");
+            const stashRef = (ref || "").trim();
+            if (!stashRef || !hash) continue;
+            stashes.push({
+              ref: stashRef,
+              hash: hash.trim(),
+              baseHash: (parentStr || "").trim().split(" ").filter(Boolean)[0] || null,
+              subject: (subject || "").trim() || stashRef,
+              timestamp: Number(at) || 0,
+              author: (author || "").trim() || "Stash",
+              email: (email || "").trim(),
+            });
+          }
+        }
+
         // Working tree status & numstat
         const wtFiles = [];
+        let stagedCount = 0;
         const statusRes = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (statusRes.code === 0 && statusRes.stdout) {
           const stats = {};
@@ -1271,6 +1350,7 @@ export default class GitGraph extends View {
             const filePath = entry.slice(3);
             const fresh = xy === "??";
             const conflict = xy.includes("U") || xy === "AA" || xy === "DD";
+            if (!conflict && xy[0] !== " " && xy[0] !== "?") stagedCount++;
             const s = conflict ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
             const stat = stats[filePath] ?? { add: 0, del: 0, binary: false };
             wtFiles.push({ path: filePath, status: s, fresh, ...stat });
@@ -1349,6 +1429,8 @@ export default class GitGraph extends View {
         this.behind = behind;
         this.detached = detached;
         this.workingTreeFiles = wtFiles;
+        this.stagedCount = stagedCount;
+        this.stashes = stashes;
         this.commits = commits;
         this.error = logError;
         this.applyFilter();
@@ -1370,7 +1452,9 @@ export default class GitGraph extends View {
               this.clearSelection(cx);
             }
           } else {
-            const stillThere = this.commits.find((c) => c.hash === this.selectedCommit.hash);
+            const stillThere =
+              this.commits.find((c) => c.hash === this.selectedCommit.hash) ||
+              this.stashNodes.find((c) => c.hash === this.selectedCommit.hash);
             if (stillThere) {
               this.selectedCommit = stillThere;
             } else if (this.workingTreeFiles.length > 0) {
@@ -1794,6 +1878,48 @@ export default class GitGraph extends View {
     cx.notify();
   }
 
+  /** Right-click menu for a saved stash row. */
+  openStashContextMenu(stash, e, cx, overrideX, overrideY) {
+    const menuWidth = 240;
+    const menuHeight = 190;
+    const origin = this.rootOrigin;
+    const b = /** @type {any} */ (this.rootBounds);
+    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
+    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
+
+    const maxW = this.width || b?.width || 600;
+    const maxH = this.height || b?.height || 600;
+    if (x + menuWidth > maxW) {
+      x = Math.max(10, maxW - menuWidth - 10);
+    }
+    if (y + menuHeight > maxH) {
+      y = Math.max(10, maxH - menuHeight - 10);
+    }
+    this.contextMenu = { type: "stash", stash, x, y };
+    cx.notify();
+  }
+
+  /** Right-click menu for the Working Tree row: stash and restore changes. */
+  openWorkingTreeContextMenu(e, cx, overrideX, overrideY) {
+    const menuWidth = 260;
+    const menuHeight = 190;
+    const origin = this.rootOrigin;
+    const b = /** @type {any} */ (this.rootBounds);
+    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
+    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
+
+    const maxW = this.width || b?.width || 600;
+    const maxH = this.height || b?.height || 600;
+    if (x + menuWidth > maxW) {
+      x = Math.max(10, maxW - menuWidth - 10);
+    }
+    if (y + menuHeight > maxH) {
+      y = Math.max(10, maxH - menuHeight - 10);
+    }
+    this.contextMenu = { type: "working-tree", x, y };
+    cx.notify();
+  }
+
   closeContextMenu(cx) {
     if (this.contextMenu) {
       this.contextMenu = null;
@@ -1853,6 +1979,30 @@ export default class GitGraph extends View {
       });
       this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
       this.focusModalInput(cx);
+    } else if (type === "stash") {
+      this.modalDialog = {
+        type,
+        stashStaged: Boolean(target?.staged),
+        includeUntracked: true,
+        error: null,
+      };
+      this.modalInput = InputState.new({ placeholder: "Stash message (optional)" });
+      this.modalInput.on("change", (_e, cx) => {
+        if (this.modalDialog?.error) {
+          this.modalDialog.error = null;
+        }
+        cx.notify();
+      });
+      this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
+      this.focusModalInput(cx);
+    } else if (type === "unstash" || type === "drop-stash") {
+      this.modalDialog = {
+        type,
+        stashRef: target?.stashRef || target?.ref || "stash@{0}",
+        stashSubject: target?.subject || "",
+        error: null,
+      };
+      this.modalInput = null;
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
@@ -1886,6 +2036,7 @@ export default class GitGraph extends View {
     // read and checked synchronously; everything after the first await runs
     // in a spawned task with an AsyncContext.
     let name = null;
+    let stashMessage = null;
     if (type === "branch" || type === "tag" || type === "publish") {
       name = this.modalInput?.value().trim();
       const what = type === "branch" ? "Branch" : type === "tag" ? "Tag" : "Repository";
@@ -1909,6 +2060,14 @@ export default class GitGraph extends View {
       dialog.error = this.hasHead ? "Cannot push from a detached HEAD" : "This repository has no commits yet";
       cx.notify();
       return;
+    }
+    if (type === "stash") {
+      stashMessage = this.modalInput?.value().trim() || "";
+      if (dialog.stashStaged && this.stagedCount === 0) {
+        dialog.error = "There are no staged changes to stash.";
+        cx.notify();
+        return;
+      }
     }
 
     this.busy = true;
@@ -1995,6 +2154,54 @@ export default class GitGraph extends View {
             timeout: url ? 6000 : 2500,
           });
           this.refresh(cx);
+        } else if (type === "stash") {
+          const args = [...NON_INTERACTIVE, "stash", "push"];
+          if (dialog.stashStaged) args.push("--staged");
+          else if (dialog.includeUntracked) args.push("--include-untracked");
+          if (stashMessage) args.push("-m", stashMessage);
+          const count = this.workingTreeFiles.length;
+          const r = await exec("git", args, { cwd: root, on });
+          if (r.code === 0) {
+            this.closeModal(cx);
+            notify({
+              title: "Changes stashed",
+              body: dialog.stashStaged
+                ? "Saved staged changes to a new stash."
+                : `Saved ${count} uncommitted file${count === 1 ? "" : "s"} to a new stash.`,
+              level: "success",
+            });
+            this.refresh(cx);
+          } else {
+            fail((r.stderr || r.stdout).trim().slice(0, 800) || "git stash failed");
+          }
+        } else if (type === "unstash") {
+          const stashRef = dialog.stashRef || "stash@{0}";
+          const r = await exec(
+            "git",
+            [...NON_INTERACTIVE, "stash", "pop", "--index", "--end-of-options", stashRef],
+            { cwd: root, on }
+          );
+          if (r.code === 0) {
+            this.closeModal(cx);
+            notify({ title: "Stash restored", body: `Applied ${stashRef}.`, level: "success" });
+            this.refresh(cx);
+          } else {
+            fail((r.stderr || r.stdout).trim().slice(0, 800) || `Failed to restore ${stashRef}`);
+            this.refresh(cx);
+          }
+        } else if (type === "drop-stash") {
+          const stashRef = dialog.stashRef || "stash@{0}";
+          const r = await exec("git", [...NON_INTERACTIVE, "stash", "drop", "--end-of-options", stashRef], {
+            cwd: root,
+            on,
+          });
+          if (r.code === 0) {
+            this.closeModal(cx);
+            notify({ title: "Stash dropped", body: `Removed ${stashRef}.`, level: "success" });
+            this.refresh(cx);
+          } else {
+            fail((r.stderr || r.stdout).trim().slice(0, 800) || `Failed to drop ${stashRef}`);
+          }
         } else if (type === "reset") {
           const mode = dialog.resetMode || "mixed";
           const r = await exec("git", [...NON_INTERACTIVE, "reset", `--${mode}`, "--end-of-options", commit.hash], { cwd: root, on });
@@ -2136,6 +2343,42 @@ export default class GitGraph extends View {
     });
   }
 
+  /** Applies a stash without dropping it. */
+  applyStash(stash, cx) {
+    if (!this.root || this.busy) return;
+    const root = this.root;
+    const on = this.on;
+    const stashRef = stash.stashRef || stash.ref || "stash@{0}";
+    this.busy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let ok = false;
+      let body = "";
+      try {
+        const r = await exec(
+          "git",
+          [...NON_INTERACTIVE, "stash", "apply", "--index", "--end-of-options", stashRef],
+          { cwd: root, on }
+        );
+        ok = r.code === 0;
+        body = ok
+          ? `Applied ${stashRef} and kept it in the stash list.`
+          : (r.stderr || r.stdout).trim().slice(0, 800) || "git stash apply failed";
+      } catch (err) {
+        body = err instanceof Error ? err.message : String(err);
+      } finally {
+        this.busy = false;
+        notify({
+          title: ok ? "Stash applied" : "Stash apply failed",
+          body,
+          level: ok ? "success" : "error",
+        });
+        this.refresh(cx);
+        cx.notify();
+      }
+    });
+  }
+
   handleKeyDown(e, cx) {
     if (e.key === "escape") {
       if (this.modalDialog) {
@@ -2270,6 +2513,7 @@ export default class GitGraph extends View {
     const laneX = (lane) => startX + lane * laneWidth;
     const laneColor = (idx) => color(getLaneColor(idx, t));
     const wtColor = color(t.working || t.ansi3 || t.accent);
+    const stashColor = color(t.ansi3 || t.accent);
 
     // Every edge runs node-row center to node-row center as one cosine S-curve
     // (vertical at both ends), split across the two rows it crosses: the upper
@@ -2326,7 +2570,11 @@ export default class GitGraph extends View {
       elements.push(...edge(`down-${commit.hash}-${i}`, e, "down"));
     });
 
-    const myColor = commit.isWorkingTree ? wtColor : laneColor(commit.colorIdx ?? commit.lane);
+    const myColor = commit.isWorkingTree
+      ? wtColor
+      : commit.isStash
+      ? stashColor
+      : laneColor(commit.colorIdx ?? commit.lane);
     const cx0 = laneX(commit.lane);
 
     // Parents outside the loaded view: a fading stub to the row bottom.
@@ -2354,7 +2602,9 @@ export default class GitGraph extends View {
         .top(centerY - size / 2)
         .size(size)
         .rounded_full();
-    if (commit.isWorkingTree) {
+    if (commit.isStash) {
+      elements.push(node(9).rounded(2).bg(color(t.background)).border_2().border_color(stashColor));
+    } else if (commit.isWorkingTree) {
       elements.push(node(11).bg(color(t.background)).border_2().border_color(wtColor));
     } else {
       if (commit.isHead) {
@@ -2419,7 +2669,7 @@ export default class GitGraph extends View {
               .text_color(color(t.ansi3 || t.accent))
               .text_size(10)
               .font_semibold()
-              .child("DIRTY")
+              .child("WIP")
           )
           .child(
             div()
@@ -2453,6 +2703,102 @@ export default class GitGraph extends View {
                 .font_family(String(settings().font_family ?? "JetBrains Mono"))
                 .text_color(color(t.dim))
                 .child("Unsaved")
+            )
+          )
+      );
+  }
+
+  /** One saved stash, rendered as a standalone row above the working tree. */
+  renderStashRow(item, t, isCompact, cx) {
+    const isSelected = this.selectedCommit?.hash === item.hash && !this.selectedCommit.isWorkingTree;
+    const base = item.baseHash ? item.baseHash.slice(0, 7) : null;
+    const showBase = Boolean(base && !item.subject.includes(base));
+
+    return h_flex()
+      .id(`commit-stash-${item.hash}`)
+      .w_full()
+      .h(30)
+      .flex_none()
+      .items_center()
+      .border_b(1)
+      .border_color(color(t.border))
+      .cursor_pointer()
+      .when(isSelected, (e) => e.bg(color(t.selected)))
+      .when(!isSelected, (e) => e.bg(color((t.ansi3 || t.accent) + "0d")))
+      .hover((s) => s.bg(color(isSelected ? t.selected : t.hover)))
+      .child(this.renderGraphLanes(item, t))
+      .child(div().id("stash-graph-divider").w(1).h_full().flex_none().bg(color(t.border)))
+      .child(
+        h_flex()
+          .flex_1()
+          .min_w(0)
+          .items_center()
+          .gap(10)
+          .pr(10)
+          .child(
+            h_flex()
+              .id(`stash-badge-${item.hash}`)
+              .gap(4)
+              .items_center()
+              .px(5)
+              .py(1)
+              .rounded(4)
+              .bg(color((t.ansi3 || t.accent) + "26"))
+              .border_1()
+              .border_color(color((t.ansi3 || t.accent) + "77"))
+              .child(svg("mods/git-graph/icons/stash.svg").size(9).text_color(color(t.ansi3 || t.accent)))
+              .child(
+                div()
+                  .text_color(color(t.ansi3 || t.accent))
+                  .text_size(10)
+                  .font_semibold()
+                  .child(item.stashRef)
+              )
+          )
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .text_size(12)
+              .font_medium()
+              .text_color(color(t.foreground))
+              .child(item.subject)
+          )
+          .when(showBase, (e) =>
+            e.child(div().flex_none().text_size(9).text_color(color(t.muted)).child(`on ${base}`))
+          )
+          .child(
+            div()
+              .w(56)
+              .flex_none()
+              .pl(4)
+              .truncate()
+              .text_size(11)
+              .text_color(color(t.muted))
+              .child(formatRelativeTime(item.timestamp))
+          )
+          .when(!isCompact, (e) =>
+            e.child(
+              div()
+                .w(130)
+                .flex_none()
+                .truncate()
+                .text_size(11)
+                .text_color(color(t.muted))
+                .child(item.author)
+            )
+          )
+          .when(!isCompact, (e) =>
+            e.child(
+              div()
+                .w(70)
+                .flex_none()
+                .text_center()
+                .text_size(11)
+                .font_family(String(settings().font_family ?? "JetBrains Mono"))
+                .text_color(color(t.dim))
+                .child(item.shortHash)
             )
           )
       );
@@ -3075,6 +3421,9 @@ export default class GitGraph extends View {
               (range, cx) => {
                 const slice = visibleItems.slice(range.start, range.end);
                 return slice.map((item) => {
+                  if (item.isStash) {
+                    return this.renderStashRow(item, t, isCompact, cx);
+                  }
                   if (item.isWorkingTree) {
                     return this.renderWorkingTreeRow(item, t, isCompact, cx);
                   }
@@ -3088,8 +3437,14 @@ export default class GitGraph extends View {
                 if (key === "__WORKING_TREE__") {
                   this.selectWorkingTree(cx);
                 } else {
-                  const item = this.commits.find((c) => c.hash === key);
+                  const item =
+                    this.commits.find((c) => c.hash === key) ||
+                    this.stashNodes.find((c) => c.hash === key);
                   if (item) {
+                    if (item.isStash) {
+                      this.selectCommit(item, cx);
+                      return;
+                    }
                     const clickX = event?.local_position?.x;
                     if (typeof clickX === "number" && item._badgeBoxes) {
                       const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
@@ -3113,19 +3468,27 @@ export default class GitGraph extends View {
                 }
               })
               .on_item_secondary_click((key, event, cx) => {
-                if (key !== "__WORKING_TREE__") {
-                  const item = this.commits.find((c) => c.hash === key);
-                  if (item) {
-                    const clickX = event?.local_position?.x;
-                    if (typeof clickX === "number" && item._badgeBoxes) {
-                      const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
-                      if (hit && (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch")) {
-                        this.openBranchContextMenu(hit.ref, event, cx);
-                        return;
-                      }
-                    }
-                    this.openCommitContextMenu(item, event, cx);
+                if (key === "__WORKING_TREE__") {
+                  this.openWorkingTreeContextMenu(event, cx);
+                  return;
+                }
+                const item =
+                  this.commits.find((c) => c.hash === key) ||
+                  this.stashNodes.find((c) => c.hash === key);
+                if (item) {
+                  if (item.isStash) {
+                    this.openStashContextMenu(item, event, cx);
+                    return;
                   }
+                  const clickX = event?.local_position?.x;
+                  if (typeof clickX === "number" && item._badgeBoxes) {
+                    const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
+                    if (hit && (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch")) {
+                      this.openBranchContextMenu(hit.ref, event, cx);
+                      return;
+                    }
+                  }
+                  this.openCommitContextMenu(item, event, cx);
                 }
               })
           )
@@ -3771,6 +4134,193 @@ export default class GitGraph extends View {
     const cMenu = this.contextMenu;
     if (!cMenu) return null;
 
+    const menuItem = (id, label, icon, onClick, hint = null, disabled = false) =>
+      h_flex()
+        .id(id)
+        .h(hint ? 30 : 26)
+        .px(8)
+        .gap(6)
+        .items_center()
+        .rounded(5)
+        .when(disabled, (e) => e.opacity(0.45).cursor_not_allowed())
+        .when(!disabled, (e) =>
+          e
+            .cursor_pointer()
+            .hover((s) => s.bg(color(t.hover)))
+            .on_click((_e, cx) => {
+              this.closeContextMenu(cx);
+              onClick(cx);
+            })
+        )
+        .child(
+          div()
+            .w(14)
+            .h(14)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon ? svg(icon).size(12).text_color(color(disabled ? t.muted : t.dim)) : div())
+        )
+        .child(
+          hint
+            ? v_flex()
+                .flex_1()
+                .min_w(0)
+                .gap(1)
+                .child(div().truncate().text_color(color(disabled ? t.muted : t.foreground)).child(label))
+                .child(div().truncate().text_size(9).text_color(color(t.muted)).child(hint))
+            : div().flex_1().truncate().child(label)
+        );
+
+    if (cMenu.type === "stash") {
+      const stash = cMenu.stash;
+      return div()
+        .id("context-menu-backdrop")
+        .absolute()
+        .inset_0()
+        .on_mouse_down("left", (_e, cx) => this.closeContextMenu(cx))
+        .on_mouse_down("right", (_e, cx) => this.closeContextMenu(cx))
+        .child(
+          v_flex()
+            .id("stash-context-menu")
+            .absolute()
+            .left(cMenu.x)
+            .top(cMenu.y)
+            .w(240)
+            .p(4)
+            .rounded(8)
+            .bg(color(t.popover))
+            .border_1()
+            .border_color(color(t.border))
+            .shadow_lg()
+            .text_size(11)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_mouse_down("right", (_e, cx) => cx.stop_propagation())
+            .child(
+              h_flex()
+                .px(8)
+                .py(4)
+                .gap(6)
+                .items_center()
+                .child(svg("mods/git-graph/icons/stash.svg").size(12).text_color(color(t.ansi3 || t.accent)))
+                .child(
+                  div()
+                    .flex_1()
+                    .truncate()
+                    .font_semibold()
+                    .child(`${stash.stashRef} · ${stash.subject}`)
+                )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem("smenu-unstash", "Unstash (Pop)…", "mods/git-graph/icons/unstash.svg", (cx) =>
+                this.openModal("unstash", stash, cx)
+              )
+            )
+            .child(
+              menuItem("smenu-apply", "Apply Stash (Keep)", "mods/git-graph/icons/stash.svg", (cx) =>
+                this.applyStash(stash, cx)
+              )
+            )
+            .child(
+              menuItem("smenu-drop", "Drop Stash…", "mods/git-graph/icons/trash.svg", (cx) =>
+                this.openModal("drop-stash", stash, cx)
+              )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem("smenu-copy-ref", "Copy Stash Ref", "mods/git-graph/icons/copy.svg", (cx) => {
+                cx.write_to_clipboard(stash.stashRef);
+                notify({ title: "Stash ref copied", body: stash.stashRef, level: "success", timeout: 1500 });
+              })
+            )
+            .child(
+              menuItem("smenu-copy-sha", "Copy Stash SHA", "mods/git-graph/icons/copy.svg", (cx) => {
+                cx.write_to_clipboard(stash.hash);
+                notify({ title: "Stash SHA copied", body: stash.shortHash, level: "success", timeout: 1500 });
+              })
+            )
+        );
+    }
+
+    if (cMenu.type === "working-tree") {
+      const count = this.workingTreeFiles.length;
+      const latest = this.stashes[0] || null;
+      return div()
+        .id("context-menu-backdrop")
+        .absolute()
+        .inset_0()
+        .on_mouse_down("left", (_e, cx) => this.closeContextMenu(cx))
+        .on_mouse_down("right", (_e, cx) => this.closeContextMenu(cx))
+        .child(
+          v_flex()
+            .id("working-tree-context-menu")
+            .absolute()
+            .left(cMenu.x)
+            .top(cMenu.y)
+            .w(260)
+            .p(4)
+            .rounded(8)
+            .bg(color(t.popover))
+            .border_1()
+            .border_color(color(t.border))
+            .shadow_lg()
+            .text_size(11)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_mouse_down("right", (_e, cx) => cx.stop_propagation())
+            .child(
+              h_flex()
+                .px(8)
+                .py(4)
+                .gap(6)
+                .items_center()
+                .child(svg("mods/git-graph/icons/stash.svg").size(12).text_color(color(t.ansi3 || t.accent)))
+                .child(
+                  div()
+                    .flex_1()
+                    .truncate()
+                    .font_semibold()
+                    .child(`Working Tree · ${count} uncommitted file${count === 1 ? "" : "s"}`)
+                )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem(
+                "wtmenu-stash-all",
+                "Stash All Changes…",
+                "mods/git-graph/icons/stash.svg",
+                (cx) => this.openModal("stash", { staged: false }, cx),
+                `${count} file${count === 1 ? "" : "s"} · optionally includes untracked`,
+                count === 0
+              )
+            )
+            .child(
+              menuItem(
+                "wtmenu-stash-staged",
+                "Stash Staged Changes…",
+                "mods/git-graph/icons/stash.svg",
+                (cx) => this.openModal("stash", { staged: true }, cx),
+                this.stagedCount > 0
+                  ? `${this.stagedCount} staged file${this.stagedCount === 1 ? "" : "s"}`
+                  : "Nothing staged",
+                this.stagedCount === 0
+              )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem(
+                "wtmenu-unstash",
+                latest ? "Unstash Latest…" : "Unstash Latest",
+                "mods/git-graph/icons/unstash.svg",
+                (cx) => this.openModal("unstash", latest, cx),
+                latest ? `${latest.ref} · ${latest.subject}` : "No stashes yet",
+                !latest
+              )
+            )
+        );
+    }
+
     if (cMenu.type === "branch") {
       const ref = cMenu.ref;
       const isRemote = ref.kind === "remote";
@@ -3911,32 +4461,6 @@ export default class GitGraph extends View {
     }
 
     const commit = cMenu.commit;
-
-    const menuItem = (id, label, icon, onClick) =>
-      h_flex()
-        .id(id)
-        .h(26)
-        .px(8)
-        .gap(6)
-        .items_center()
-        .rounded(5)
-        .cursor_pointer()
-        .hover((s) => s.bg(color(t.hover)))
-        .on_click((_e, cx) => {
-          this.closeContextMenu(cx);
-          onClick(cx);
-        })
-        .child(
-          div()
-            .w(14)
-            .h(14)
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(icon ? svg(icon).size(12).text_color(color(t.dim)) : div())
-        )
-        .child(div().flex_1().truncate().child(label));
 
     return div()
       .id("context-menu-backdrop")
@@ -4080,7 +4604,15 @@ export default class GitGraph extends View {
                   .text_size(13)
                   .text_color(color(t.foreground))
                   .child(
-                    dialog.type === "publish"
+                    dialog.type === "stash"
+                      ? dialog.stashStaged
+                        ? "Stash Staged Changes"
+                        : "Stash All Changes"
+                      : dialog.type === "unstash"
+                      ? `Unstash ${dialog.stashRef || "Latest"}`
+                      : dialog.type === "drop-stash"
+                      ? `Drop ${dialog.stashRef || "Stash"}`
+                      : dialog.type === "publish"
                       ? "Publish to GitHub"
                       : dialog.type === "branch"
                       ? `Create Branch at ${commit.shortHash}`
@@ -4108,7 +4640,15 @@ export default class GitGraph extends View {
                   .text_size(11)
                   .text_color(color(t.muted))
                   .child(
-                    dialog.type === "publish"
+                    dialog.type === "stash"
+                      ? dialog.stashStaged
+                        ? "Save only the staged changes to a new stash, leaving unstaged edits in place"
+                        : `Save ${this.workingTreeFiles.length} uncommitted file${this.workingTreeFiles.length === 1 ? "" : "s"} to a new stash`
+                      : dialog.type === "unstash"
+                      ? `Apply "${dialog.stashSubject || dialog.stashRef}" and remove it from the stash list`
+                      : dialog.type === "drop-stash"
+                      ? `Permanently remove "${dialog.stashSubject || dialog.stashRef}" from the stash list`
+                      : dialog.type === "publish"
                       ? `Create a new GitHub repository${dialog.account ? ` as @${dialog.account}` : ""} and push '${this.currentBranch}'`
                       : dialog.type === "branch"
                       ? `Create a new branch pointing to commit ${commit.shortHash}`
@@ -4161,6 +4701,36 @@ export default class GitGraph extends View {
                 .text_size(10.5)
                 .text_color(color(t.ansi3))
                 .child("⚠️ Rebasing rewrites commit history on the current branch.")
+            )
+          )
+          .when(dialog.type === "unstash", (e) =>
+            e.child(
+              v_flex()
+                .gap(3)
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi3 + "18"))
+                .border_1()
+                .border_color(color(t.ansi3 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi3))
+                .child(`Applies ${dialog.stashRef} with --index and removes it from the stash list.`)
+                .when(this.workingTreeFiles.length > 0, (el) =>
+                  el.child("The working tree has uncommitted changes; restoring may conflict.")
+                )
+            )
+          )
+          .when(dialog.type === "drop-stash", (e) =>
+            e.child(
+              div()
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi1 + "18"))
+                .border_1()
+                .border_color(color(t.ansi1 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi1))
+                .child("⚠️ Dropping a stash permanently removes the saved changes. This cannot be undone.")
             )
           )
           // Inline error display
@@ -4298,6 +4868,63 @@ export default class GitGraph extends View {
                 )
             )
           )
+          // Stash inputs: optional message and untracked-files choice.
+          .when(dialog.type === "stash", (e) =>
+            e
+              .child(
+                Input.new(this.modalInput)
+                  .id("modal-stash-message-input")
+                  .h(32)
+                  .w_full()
+                  .px(8)
+                  .rounded(6)
+                  .border_1()
+                  .border_color(color(t.border))
+                  .bg(color(t.background))
+                  .text_size(12)
+                  .text_color(color(t.foreground))
+              )
+              .when(!dialog.stashStaged, (el) =>
+                el.child(
+                  h_flex()
+                    .id("modal-stash-untracked-toggle")
+                    .gap(6)
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click((_e, cx) => {
+                      this.modalDialog.includeUntracked = !this.modalDialog.includeUntracked;
+                      cx.notify();
+                    })
+                    .child(
+                      div()
+                        .size(14)
+                        .rounded(3)
+                        .border_1()
+                        .border_color(color(this.modalDialog.includeUntracked ? t.accent : t.border))
+                        .bg(color(this.modalDialog.includeUntracked ? t.accent : t.background))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(this.modalDialog.includeUntracked, (box) =>
+                          box.child(div().size(6).rounded_full().bg(color(t.accent_foreground)))
+                        )
+                    )
+                    .child(div().text_size(11).text_color(color(t.dim)).child("Include untracked files"))
+                )
+              )
+              .child(
+                div()
+                  .text_size(10)
+                  .text_color(color(t.muted))
+                  .child(
+                    dialog.stashStaged
+                      ? "Only staged changes are saved; unstaged edits stay in the working tree."
+                      : dialog.includeUntracked
+                      ? "Untracked files are included in the stash."
+                      : "Untracked files stay in the working tree."
+                  )
+              )
+          )
           // Reset options
           .when(dialog.type === "reset", (e) =>
             e.child(
@@ -4417,7 +5044,7 @@ export default class GitGraph extends View {
                   .bg(color(
                     dialog.type === "reset" && dialog.resetMode === "hard"
                       ? t.ansi1
-                      : dialog.type === "confirm-delete-branch"
+                      : dialog.type === "confirm-delete-branch" || dialog.type === "drop-stash"
                       ? t.ansi1
                       : t.solid
                   ))
@@ -4429,7 +5056,21 @@ export default class GitGraph extends View {
                     this.busy
                       ? dialog.type === "publish"
                         ? "Publishing…"
+                        : dialog.type === "stash"
+                        ? "Stashing…"
+                        : dialog.type === "unstash"
+                        ? "Unstashing…"
+                        : dialog.type === "drop-stash"
+                        ? "Dropping…"
                         : "Working…"
+                      : dialog.type === "stash"
+                      ? dialog.stashStaged
+                        ? "Stash Staged"
+                        : "Stash Changes"
+                      : dialog.type === "unstash"
+                      ? "Unstash"
+                      : dialog.type === "drop-stash"
+                      ? "Drop Stash"
                       : dialog.type === "publish"
                       ? "Create & Push"
                       : dialog.type === "branch"

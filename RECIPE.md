@@ -16,7 +16,8 @@ Inside any Herdr split pane, dedicated tab, or sidebar panel, you see a full vis
   - **Author column**: Commit author name (collapses on compact screens).
   - **Commit column**: Monospace short hash (collapses on compact screens).
   - The list is a ruled table: a 1px vertical rule closes the graph column and every row carries a bottom separator, with `Graph / Description / Date / Author / Commit` headers.
-- **Working Tree Row**: If uncommitted changes exist, a top "DIRTY" row displays with added/deleted counters and connects directly downwards to HEAD in lane 0.
+- **Stash Rows**: `git stash list` refreshes with the graph. Each stash renders above the working tree as its own row: hollow stash node, `stash@{n}` pill, reflog subject, relative date, author, and stash commit. Clicking selects it and shows the stashed files with normal diff tabs; right-click offers **Unstash (Pop)**, **Apply Stash (Keep)**, **Drop Stash**, **Copy Stash Ref**, and **Copy Stash SHA**. The **All branches** log excludes `refs/stash`, so Git's internal WIP/index/untracked commits never appear as separate graph rows.
+- **Working Tree Row**: If uncommitted changes exist, a top "WIP" row displays with added/deleted counters and connects directly downwards to HEAD in lane 0. Right-clicking it offers **Stash All Changes…** (optional message, include-untracked toggle), **Stash Staged Changes…**, and **Unstash Latest…**.
 - **In-Progress Banner**: Displays an alert banner during ongoing merges, rebases, cherry-picks, or reverts with one-click Continue and Abort buttons.
 - **Details & Diff Tabs**:
   - **Header**: Selected commit subject, full commit hash with one-click Copy SHA button, author email, relative date, and close button.

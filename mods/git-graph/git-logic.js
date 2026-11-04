@@ -513,7 +513,10 @@ export function logArgs(branchFilter, commitLimit = 500) {
     "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s",
   ];
   if (branchFilter === "all") {
-    args.push("--all", "--");
+    // `--exclude` only applies to refs listed after it. `--all` includes
+    // refs/stash, whose WIP/index/untracked commits are internal stash
+    // plumbing rather than branch history, so keep them out of the graph.
+    args.push("--exclude=refs/stash", "--all", "--");
   } else if (branchFilter === "current") {
     args.push("--end-of-options", "HEAD", "--");
   } else {

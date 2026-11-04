@@ -45,6 +45,11 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - Every row carries a 1px bottom rule and a vertical rule closes the graph column; the header mirrors those columns (`Graph / Description / Date / Author / Commit`).
   - HEAD folds into the checked-out branch pill (a check icon plus the branch name) instead of a separate badge. A local branch and its matching remote share one neon pill (`⎇ main | origin`); a remote without its local branch keeps its full `origin/main` label. Tags keep the tag icon.
   - Implements pagination with a "Load 500 more commits..." button and commit count status in the toolbar.
+  - The **All branches** log excludes `refs/stash`, so Git's internal stash WIP/index/untracked commits never appear as graph rows. Each stash instead renders as one dedicated row.
+- **Stash Rows**:
+  - `git stash list` refreshes with the graph. Each stash sits above the working tree as a standalone row: a hollow stash node, a `stash@{n}` pill, the reflog subject, relative date, author, and stash commit.
+  - Clicking a stash selects it like a commit and shows its changed files in the details tree; diffs open in normal diff tabs. Right-click offers **Unstash (Pop)…**, **Apply Stash (Keep)**, **Drop Stash…**, **Copy Stash Ref**, and **Copy Stash SHA**.
+  - Right-clicking the WIP row offers **Stash All Changes…** (optional message, include-untracked toggle), **Stash Staged Changes…**, and **Unstash Latest…**.
 - **Branch Selection Filter & Ref Context Menu**:
   - Toolbar dropdown allows selecting "All branches" (`--all`), "Current branch" (`HEAD`), or any specific local/remote branch (`git log <branch>`).
   - Clicking any branch badge in the commit table instantly filters the DAG to that branch's reachable history.
@@ -63,7 +68,7 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - The task explicitly forbids pushing, fetching, force-pushing, history rewriting, `reset --hard`, and `git clean`. The button disables on a clean tree, detached HEAD, while another git action runs, or while the launched agent is still working; the success toast can peek at its terminal.
 - **Working Tree Inspection**:
   - Inspects uncommitted changes via `git status --porcelain=v1 -z --no-renames --untracked-files=all` and diff stats.
-  - Displays a top "DIRTY" row with `+add` / `−del` badges connected directly to HEAD in lane 0.
+  - Displays a top "WIP" row with `+add` / `−del` badges connected directly to HEAD in lane 0.
   - Inspects modified, added, deleted, and untracked files; each diff opens in its own tab.
 - **Docked Panel Mode**:
   - `props: { panel: true }` renders the graph as the Files-style card inside a layout panel, such as Herdr's Changes slot.

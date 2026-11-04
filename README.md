@@ -21,6 +21,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Table layout with a ruled graph column, per-row separators, and `Graph / Description / Date / Author / Commit` headers.
   - Ref pills are rounded, tinted badges: `HEAD` folds into the checked-out branch as a check pill, a local branch and its matching remote collapse into one pill (`⎇ main | origin`), a remote without its local branch keeps `⎇ origin/main`, and tags keep the tag icon.
   - Pagination with "Load 500 more commits..." button and commit count status in toolbar.
+  - The All branches view excludes `refs/stash`, so stash-internal WIP/index/untracked commits never show up as graph rows. Each stash renders as one dedicated row instead.
 - **In-Progress Operation Detection & Banner**:
   - Automatically identifies in-progress merges (`MERGE_HEAD`), rebases (`rebase-merge/`, `rebase-apply/`), cherry-picks (`CHERRY_PICK_HEAD`), and reverts (`REVERT_HEAD`).
   - Renders a top banner with direct **Continue** and **Abort** actions.
@@ -40,9 +41,13 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - It uses the low-reasoning `opencode-go/deepseek-v4.1-flash#low` variant and receives the current branch, dirty paths, and any in-progress operation in its first message.
   - The agent resolves merge/rebase/cherry-pick/revert conflicts, completes the operation, and turns the remaining changes into atomic Conventional Commits using the `git-change-workflow` skill.
   - It works on the current branch only and is explicitly told never to push, fetch, force-push, rewrite history, or discard work. The button disables when the tree is clean, HEAD is detached, or the launched agent is still running; the toast opens its terminal.
+- **Stash Rows**:
+  - Every `git stash` entry renders above the working tree as its own row: hollow stash node, `stash@{n}` pill, reflog subject, relative date, author, and stash commit.
+  - Clicking a stash shows its changed files in the details tree and opens normal diff tabs. Right-click for **Unstash (Pop)**, **Apply Stash (Keep)**, **Drop Stash**, and copy actions.
+  - Right-click the WIP row for **Stash All Changes…** (optional message, include-untracked toggle), **Stash Staged Changes…**, or **Unstash Latest…**.
 - **Working Tree Inspection**:
   - Real-time detection of dirty working trees via `git status` and diff statistics.
-  - Dedicated top "Working Tree" row displaying uncommitted changes with `+add` / `−del` counters.
+  - Dedicated top "WIP" row displaying uncommitted changes with `+add` / `−del` counters.
   - Full inspection of modified, added, deleted, and untracked files, each diff opening in its own tab.
 - **VS Code-Style Changed Files Tree**:
   - A fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder.
