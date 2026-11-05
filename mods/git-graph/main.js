@@ -5133,8 +5133,6 @@ export default class GitGraph extends View {
     const prompt = this.treeCleanupPrompt();
     const name = this.treeAgentName();
     const sessionId = this.treeAgentSessionId();
-    const space = spaces().find((s) => s.active);
-    const tab = focused()?.tab;
 
     this.treeAgentStarting = true;
     cx.notify();
@@ -5172,10 +5170,11 @@ export default class GitGraph extends View {
         }
         this.treeAgentModel = model;
 
+        // No `herdr.space` / `herdr.tab` labels: those adopt the worker into
+        // that tab as a visible pane, splitting the tab. Unlabeled terminals
+        // stay hidden; peek and kill still reach them by address.
         const args = ["run", "--bg", "--json", "--keep", "--no-parent", "--cwd", root, "--name", name];
         if (on) args.push("--on", on);
-        if (!on && space?.id) args.push("--label", `herdr.space=${space.id}`);
-        if (!on && tab) args.push("--label", `herdr.tab=${tab}`);
         args.push(
           "--",
           "opencode",
