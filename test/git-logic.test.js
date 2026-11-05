@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   computeEffectiveRoot,
+  isLayoutNodeVisible,
   parseRefs,
   logArgs,
   tagArgs,
@@ -10,7 +11,60 @@ import {
   intraLineDiff,
   diffRows,
   lineSegments,
+  wrapInlineRows,
+  wrapSplitRows,
+  isFreeModel,
+  cleanModelLabel,
+  resolveCleanAgentModelLogic,
+  filterVisibleCleanModels,
 } from "../mods/git-graph/git-logic.js";
+
+test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
+  const layout = {
+    id: "root",
+    children: [
+      {
+        id: "panel",
+        hidden: false,
+        children: [
+          {
+            id: "panel-body",
+            type: "stack",
+            active: "changes",
+            children: [
+              { id: "files", content: { mod: "files" } },
+              { id: "changes", content: { mod: "git-graph" } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  // Visible when panel is not hidden and active child matches
+  assert.equal(isLayoutNodeVisible(layout, "changes"), true);
+  assert.equal(
+    isLayoutNodeVisible(layout, (n) => n?.content?.mod === "git-graph"),
+    true
+  );
+
+  // Hidden when another stack child is active
+  layout.children[0].children[0].active = "files";
+  assert.equal(isLayoutNodeVisible(layout, "changes"), false);
+  assert.equal(
+    isLayoutNodeVisible(layout, (n) => n?.content?.mod === "git-graph"),
+    false
+  );
+
+  // Hidden when ancestor is hidden
+  layout.children[0].children[0].active = "changes";
+  layout.children[0].hidden = true;
+  assert.equal(isLayoutNodeVisible(layout, "changes"), false);
+
+  // Defaults to visible if layout root is missing or target not in tree
+  assert.equal(isLayoutNodeVisible(null, "changes"), true);
+  assert.equal(isLayoutNodeVisible(layout, "other-node"), true);
+});
 
 test("computeEffectiveRoot: handles repo switching, subdirectories, and empty locations", () => {
   // Same repo root
@@ -326,4 +380,173 @@ test("lineSegments: overlays intra-line change ranges onto syntax spans", () => 
     { text: "a = ", kind: "plain", changed: false },
     { text: "1", kind: "number", changed: true },
   ]);
+});
+
+test("wrapInlineRows: splits long lines and keeps spans and change ranges", () => {
+  const row = {
+    kind: "+",
+    oldNum: null,
+    newNum: 7,
+    text: "abcdefghijklmnopqrstuvwxy",
+    spans: [
+      { text: "abcdefghij", kind: "keyword" },
+      { text: "klmnopqrstuvwxy", kind: "plain" },
+    ],
+    changes: [[8, 15]],
+  };
+
+  const rows = wrapInlineRows([row], 10);
+
+  assert.deepEqual(
+    rows.map((r) => r.text),
+    ["abcdefghij", "klmnopqrst", "uvwxy"]
+  );
+  assert.equal(rows[0].newNum, 7);
+  assert.equal(rows[1].newNum, null);
+  assert.equal(rows[2].newNum, null);
+  assert.equal(rows[0].kind, "+");
+  assert.deepEqual(rows[0].spans, [{ text: "abcdefghij", kind: "keyword" }]);
+  assert.deepEqual(rows[0].changes, [[8, 10]]);
+  assert.deepEqual(rows[1].changes, [[0, 5]]);
+  assert.deepEqual(rows[2].changes, []);
+});
+
+test("wrapInlineRows: prefers breaking at spaces", () => {
+  const rows = wrapInlineRows([{ kind: " ", oldNum: 1, newNum: 1, text: "alpha beta gamma delta" }], 12);
+
+  assert.deepEqual(
+    rows.map((r) => r.text),
+    ["alpha beta ", "gamma delta"]
+  );
+});
+
+test("wrapInlineRows: counts code points so emoji are never split", () => {
+  const rows = wrapInlineRows([{ kind: " ", oldNum: 1, newNum: 1, text: "a😀bcdef" }], 2);
+
+  assert.deepEqual(
+    rows.map((r) => r.text),
+    ["a😀", "bc", "de", "f"]
+  );
+  assert.equal(rows.map((r) => r.text).join(""), "a😀bcdef");
+});
+
+test("wrapInlineRows: leaves a short diff untouched", () => {
+  const row = { kind: " ", oldNum: 1, newNum: 2, text: "short" };
+  const rows = wrapInlineRows([row], 80);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].text, "short");
+  assert.equal(rows[0].oldNum, 1);
+});
+
+test("wrapSplitRows: keeps panes aligned and fills the shorter side", () => {
+  const left = [
+    {
+      kind: "pair",
+      left: { kind: "-", num: 10, text: "0123456789ABCDEF", spans: [], changes: [] },
+      right: { kind: "+", num: 3, text: "short", spans: [], changes: [] },
+    },
+  ];
+
+  const wrapped = wrapSplitRows(left, left, 10);
+
+  assert.equal(wrapped.left.length, 2);
+  assert.equal(wrapped.right.length, 2);
+  assert.equal(wrapped.left[0].left.num, 10);
+  assert.equal(wrapped.left[0].left.text, "0123456789");
+  assert.equal(wrapped.left[0].right.text, "short");
+  assert.equal(wrapped.left[1].left.num, null);
+  assert.equal(wrapped.left[1].left.text, "ABCDEF");
+  assert.equal(wrapped.left[1].right, null);
+});
+
+test("wrapSplitRows: wraps hunk headers once and keeps the empty side empty", () => {
+  const left = [{ kind: "@", text: "@@ -1,2 +1,2 @@ a long hunk header" }];
+  const right = [{ kind: "@", text: "" }];
+
+  const wrapped = wrapSplitRows(left, right, 10);
+
+  assert.equal(wrapped.left.length, wrapped.right.length);
+  assert.equal(wrapped.left.map((row) => row.text).join(""), left[0].text);
+  assert.ok(wrapped.right.every((row) => row.text === ""));
+});
+
+test("isFreeModel and cleanModelLabel: correctly detect free models and format names", () => {
+  assert.equal(isFreeModel("opencode/deepseek-v4.1-flash-free#low"), true);
+  assert.equal(isFreeModel("opencode/big-pickle"), true);
+  assert.equal(isFreeModel("github-copilot/claude-haiku-5.5"), false);
+  assert.equal(isFreeModel("anthropic/claude-3-7-sonnet"), false);
+
+  assert.equal(cleanModelLabel("github-copilot/claude-haiku-5.5"), "Claude Haiku 5.5");
+  assert.equal(cleanModelLabel("opencode/deepseek-v4.1-flash-free#low"), "DeepSeek V4.1 Flash Free");
+  assert.equal(cleanModelLabel("google/gemini-2.5-flash"), "Gemini 2.5 Flash");
+});
+
+test("resolveCleanAgentModelLogic: honors saved model even if paid over default free models", () => {
+  const models = [
+    { id: "opencode/deepseek-v4.1-flash-free", free: true },
+    { id: "opencode/glm-5.3-flash-free", free: true },
+    { id: "github-copilot/claude-haiku-5.5", free: false },
+  ];
+  const preferences = ["opencode/deepseek-v4.1-flash-free#low"];
+
+  // When Haiku is saved, it should resolve to Haiku
+  const resolved = resolveCleanAgentModelLogic(models, {
+    saved: "github-copilot/claude-haiku-5.5",
+    preferences,
+  });
+  assert.equal(resolved, "github-copilot/claude-haiku-5.5");
+
+  // When an explicit override is passed, override wins
+  const overridden = resolveCleanAgentModelLogic(models, {
+    override: "opencode/glm-5.3-flash-free",
+    saved: "github-copilot/claude-haiku-5.5",
+    preferences,
+  });
+  assert.equal(overridden, "opencode/glm-5.3-flash-free");
+
+  // When saved model is not in models catalog, fallback to preference
+  const fallback = resolveCleanAgentModelLogic(models, {
+    saved: "unknown-provider/gone-model",
+    preferences,
+  });
+  assert.equal(fallback, "opencode/deepseek-v4.1-flash-free#low");
+});
+
+test("filterVisibleCleanModels: includes active paid model at index 0 even when showAll is false", () => {
+  const models = [
+    { id: "opencode/deepseek-v4.1-flash-free", label: "DeepSeek V4.1 Flash Free", provider: "opencode", free: true },
+    { id: "opencode/glm-5.3-flash-free", label: "GLM 5.3 Flash Free", provider: "opencode", free: true },
+    { id: "github-copilot/claude-haiku-5.5", label: "Claude Haiku 5.5", provider: "github-copilot", free: false },
+    { id: "github-copilot/gpt-4o", label: "GPT 4o", provider: "github-copilot", free: false },
+  ];
+
+  // showAll: false, but activeModel is Claude Haiku 5.5
+  const visible = filterVisibleCleanModels(models, {
+    showAll: false,
+    activeModel: "github-copilot/claude-haiku-5.5",
+  });
+
+  // Haiku MUST be included and at index 0
+  assert.equal(visible[0].id, "github-copilot/claude-haiku-5.5");
+  assert.ok(visible.some((m) => m.id === "opencode/deepseek-v4.1-flash-free"));
+  assert.ok(visible.some((m) => m.id === "opencode/glm-5.3-flash-free"));
+  // Other non-active paid models are omitted when showAll is false
+  assert.ok(!visible.some((m) => m.id === "github-copilot/gpt-4o"));
+
+  // When provider is github-copilot
+  const copilotVisible = filterVisibleCleanModels(models, {
+    provider: "github-copilot",
+    showAll: false,
+    activeModel: "github-copilot/claude-haiku-5.5",
+  });
+  assert.equal(copilotVisible[0].id, "github-copilot/claude-haiku-5.5");
+
+  // When search query is entered
+  const searched = filterVisibleCleanModels(models, {
+    query: "deepseek",
+    activeModel: "github-copilot/claude-haiku-5.5",
+  });
+  assert.equal(searched.length, 1);
+  assert.equal(searched[0].id, "opencode/deepseek-v4.1-flash-free");
 });

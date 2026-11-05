@@ -19,6 +19,44 @@ export function computeEffectiveRoot(currentRoot, cwd) {
   return cwd;
 }
 
+/**
+ * Determines whether a target node is currently visible in a layout tree,
+ * accounting for hidden ancestors and stack active selections.
+ *
+ * @param {any} root
+ * @param {string | ((node: any) => boolean)} targetOrPredicate
+ * @returns {boolean}
+ */
+export function isLayoutNodeVisible(root, targetOrPredicate) {
+  if (!root) return true;
+  const match =
+    typeof targetOrPredicate === "function"
+      ? targetOrPredicate
+      : (node) => node?.id === targetOrPredicate || node?.content?.mod === targetOrPredicate;
+
+  function findPath(node, path) {
+    if (match(node)) return [...path, node];
+    for (const child of node?.children ?? []) {
+      const res = findPath(child, [...path, node]);
+      if (res) return res;
+    }
+    return null;
+  }
+
+  const path = findPath(root, []);
+  if (!path) return true;
+
+  for (let i = 0; i < path.length; i++) {
+    const node = path[i];
+    if (node.hidden) return false;
+    if (node.type === "stack" && i + 1 < path.length) {
+      const activeId = node.active ?? node.children?.[0]?.id;
+      if (activeId && activeId !== path[i + 1].id) return false;
+    }
+  }
+  return true;
+}
+
 export function countLines(text) {
   return text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 }
@@ -1194,6 +1232,206 @@ export function buildDiffView(rows) {
   return { inline, left, right };
 }
 
+// --- Soft wrapping ---------------------------------------------------------
+//
+// The diff lists are uniform 22px rows, so a wrapped long line becomes several
+// consecutive display rows instead of one taller row. Splitting happens here,
+// on the highlighted rows, so syntax colors and intra-line change ranges carry
+// over to every continuation chunk. Columns are counted in code points to keep
+// surrogate pairs intact.
+
+/**
+ * Clips intra-line change ranges to one chunk and rebases them to its start.
+ *
+ * @param {Array<[number, number]>} changes
+ * @param {number} start
+ * @param {number} end
+ * @returns {Array<[number, number]>}
+ */
+function sliceRanges(changes, start, end) {
+  /** @type {Array<[number, number]>} */
+  const out = [];
+  for (const [from, to] of changes ?? []) {
+    const a = Math.max(from, start);
+    const b = Math.min(to, end);
+    if (b > a) out.push([a - start, b - start]);
+  }
+  return out;
+}
+
+/**
+ * The code-point index where a chunk starting at `start` should end. It takes
+ * `limit` characters, then backs up to the last space in the second half so a
+ * word stays whole when the line has one; unbreakable runs still hard-wrap.
+ *
+ * @param {string[]} chars
+ * @param {number} start
+ * @param {number} limit
+ * @returns {number}
+ */
+function wrapBreak(chars, start, limit) {
+  const end = Math.min(chars.length, start + limit);
+  if (end >= chars.length) return end;
+
+  const floor = start + Math.max(1, Math.floor(limit / 2));
+  for (let i = end; i > floor; i--) {
+    if (SPACE_CHAR.test(chars[i - 1])) return i;
+  }
+  return end;
+}
+
+/**
+ * Splits one diff cell into chunks of at most `columns` code points, keeping
+ * its syntax spans and rebased change ranges on each chunk.
+ *
+ * @param {{ text?: string, spans?: Array<{ text: string, kind: string }>, changes?: Array<[number, number]> }} cell
+ * @param {number} columns
+ * @returns {Array<{ text: string, spans: Array<{ text: string, kind: string }>, changes: Array<[number, number]> }>}
+ */
+function wrapCellChunks(cell, columns) {
+  const text = cell.text ?? "";
+  const spans = cell.spans ?? [];
+  const changes = cell.changes ?? [];
+  const limit = Math.max(1, Math.floor(columns));
+
+  if (!text) return [{ text: "", spans: [], changes: [] }];
+
+  const chars = Array.from(text);
+  const offsets = codePointOffsets(chars);
+  /** @type {Array<{ text: string, spans: Array<{ text: string, kind: string }>, changes: Array<[number, number]> }>} */
+  const chunks = [];
+
+  // Walk the spans with the chunks instead of rescanning from the start, so a
+  // very long minified line stays linear.
+  let spanIndex = 0;
+  let spanStart = 0;
+
+  for (let charIndex = 0; charIndex < chars.length; ) {
+    const endIndex = wrapBreak(chars, charIndex, limit);
+    const start = offsets[charIndex];
+    const end = offsets[endIndex];
+
+    while (spanIndex < spans.length && spanStart + spans[spanIndex].text.length <= start) {
+      spanStart += spans[spanIndex].text.length;
+      spanIndex++;
+    }
+
+    /** @type {Array<{ text: string, kind: string }>} */
+    const parts = [];
+    let index = spanIndex;
+    let position = spanStart;
+    while (index < spans.length && position < end) {
+      const span = spans[index];
+      const a = Math.max(start, position);
+      const b = Math.min(end, position + span.text.length);
+      if (b > a) parts.push({ kind: span.kind, text: span.text.slice(a - position, b - position) });
+      position += span.text.length;
+      index++;
+    }
+
+    const chunkText = chars.slice(charIndex, endIndex).join("");
+    if (!parts.length && chunkText) parts.push({ kind: "plain", text: chunkText });
+
+    chunks.push({ text: chunkText, spans: parts, changes: sliceRanges(changes, start, end) });
+    charIndex = endIndex;
+  }
+
+  return chunks;
+}
+
+/**
+ * Expands inline diff rows into display rows of `columns` code points each.
+ * Line numbers stay on the first chunk; continuation chunks keep the row's
+ * kind so added/removed backgrounds carry down the wrap.
+ *
+ * @param {Array<any>} rows
+ * @param {number} columns
+ * @returns {Array<any>}
+ */
+export function wrapInlineRows(rows, columns) {
+  /** @type {Array<any>} */
+  const out = [];
+
+  for (const row of rows) {
+    const chunks = wrapCellChunks(row, columns);
+
+    if (row.kind === "@" || row.kind === "\\") {
+      for (const chunk of chunks) out.push({ ...row, text: chunk.text });
+      continue;
+    }
+
+    chunks.forEach((chunk, index) => {
+      out.push({
+        ...row,
+        text: chunk.text,
+        spans: chunk.spans,
+        changes: chunk.changes,
+        oldNum: index === 0 ? row.oldNum ?? null : null,
+        newNum: index === 0 ? row.newNum ?? null : null,
+      });
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Expands both split columns in lockstep. A pair yields as many display rows
+ * as its longest side needs, and the shorter side becomes filler cells; that
+ * keeps both panes at the same row count and the shared scroll in sync.
+ *
+ * @param {Array<any>} left
+ * @param {Array<any>} right
+ * @param {number} columns
+ * @returns {{ left: Array<any>, right: Array<any> }}
+ */
+export function wrapSplitRows(left, right, columns) {
+  /** @type {Array<any>} */
+  const outLeft = [];
+  /** @type {Array<any>} */
+  const outRight = [];
+  const count = Math.max(left.length, right.length);
+
+  for (let i = 0; i < count; i++) {
+    const l = left[i] ?? null;
+    const r = right[i] ?? l;
+
+    if (l?.kind === "pair" || r?.kind === "pair") {
+      const leftCell = l?.kind === "pair" ? l.left : null;
+      const rightCell = r?.kind === "pair" ? r.right : null;
+      const leftChunks = leftCell ? wrapCellChunks(leftCell, columns) : [];
+      const rightChunks = rightCell ? wrapCellChunks(rightCell, columns) : [];
+      const lines = Math.max(leftChunks.length, rightChunks.length, 1);
+
+      for (let j = 0; j < lines; j++) {
+        const row = {
+          kind: "pair",
+          left: leftChunks[j]
+            ? { ...leftCell, ...leftChunks[j], num: j === 0 ? leftCell.num ?? null : null }
+            : null,
+          right: rightChunks[j]
+            ? { ...rightCell, ...rightChunks[j], num: j === 0 ? rightCell.num ?? null : null }
+            : null,
+        };
+        outLeft.push(row);
+        outRight.push(row);
+      }
+      continue;
+    }
+
+    const leftChunks = wrapCellChunks(l ?? { text: "" }, columns);
+    const rightChunks = wrapCellChunks(r ?? { text: "" }, columns);
+    const lines = Math.max(leftChunks.length, rightChunks.length, 1);
+
+    for (let j = 0; j < lines; j++) {
+      outLeft.push({ kind: l?.kind ?? "@", text: leftChunks[j]?.text ?? "" });
+      outRight.push({ kind: r?.kind ?? l?.kind ?? "@", text: rightChunks[j]?.text ?? "" });
+    }
+  }
+
+  return { left: outLeft, right: outRight };
+}
+
 /**
  * Splits one syntax highlighter span list into drawable segments, marking the
  * segments that fall inside an intra-line change range. Adjacent segments with
@@ -1244,4 +1482,112 @@ export function lineSegments(spans, changes) {
   }
 
   return out;
+}
+
+/**
+ * True for a model the OpenCode catalog offers without charge.
+ *
+ * @param {string} id
+ * @returns {boolean}
+ */
+export function isFreeModel(id) {
+  const base = String(id || "").split("#")[0];
+  return /(?:^|[/-])free(?:$|[/-])/.test(base) || base === "opencode/big-pickle";
+}
+
+/**
+ * A readable label for a `provider/model#variant` id.
+ *
+ * @param {string} id
+ * @returns {string}
+ */
+export function cleanModelLabel(id) {
+  const base = String(id || "").split("#")[0];
+  const name = base.split("/").pop() || base;
+  const special = {
+    claude: "Claude",
+    crouton: "Crouton",
+    deepseek: "DeepSeek",
+    flint: "Flint",
+    gemini: "Gemini",
+    glm: "GLM",
+    gpt: "GPT",
+    iceman: "Iceman",
+    kimi: "Kimi",
+    llama: "Llama",
+    mimo: "MiMo",
+    nemotron: "Nemotron",
+    pulse: "Pulse",
+    qwen: "Qwen",
+    sonnet: "Sonnet",
+  };
+  return name
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => special[word.toLowerCase()] || (word.length <= 3 ? word.toUpperCase() : word[0].toUpperCase() + word.slice(1)))
+    .join(" ");
+}
+
+/**
+ * Resolves which AI commit model to use:
+ * 1. An explicit override/requested model wins if it is available in models.
+ * 2. A saved preference wins if it is available in models.
+ * 3. Fallback preferences in priority order.
+ * 4. First available free model.
+ *
+ * @param {Array<any>} models
+ * @param {{ override?: string | null, saved?: string | null, preferences?: string[] }} [options]
+ * @returns {string | null}
+ */
+export function resolveCleanAgentModelLogic(models, { override = null, saved = null, preferences = [] } = {}) {
+  const baseOf = (id) => String(id || "").split("#")[0];
+  const list = Array.isArray(models) ? models : [];
+  const has = (id) => Boolean(id) && list.some((m) => (m.id || m) === baseOf(id));
+  if (override && has(override)) return override;
+  if (saved && has(saved)) return saved;
+  for (const candidate of preferences) {
+    if (has(candidate)) return candidate;
+  }
+  const free = list.find((m) => m?.free);
+  return free ? free.id : null;
+}
+
+/**
+ * Filters and orders models for the AI worker picker dialog.
+ * Pins the currently active model to the top so it is immediately visible
+ * and clearly indicated, even if showAll is false or searching.
+ *
+ * @param {Array<any>} models
+ * @param {{ provider?: string | null, query?: string, showAll?: boolean, activeModel?: string | null }} [options]
+ * @returns {Array<any>}
+ */
+export function filterVisibleCleanModels(models, { provider = null, query = "", showAll = false, activeModel = null } = {}) {
+  const all = Array.isArray(models) ? models : [];
+  const pool = provider ? all.filter((m) => m.provider === provider) : all;
+  const activeBase = String(activeModel || "").split("#")[0];
+  const trimmed = String(query || "").trim().toLowerCase();
+  let list;
+  if (trimmed) {
+    list = pool.filter(
+      (m) => (m.id && m.id.toLowerCase().includes(trimmed)) || (m.label && m.label.toLowerCase().includes(trimmed))
+    );
+  } else if (showAll) {
+    list = [...pool];
+  } else {
+    list = pool.filter((m) => m.free);
+    if (activeBase && pool.some((m) => m.id === activeBase) && !list.some((m) => m.id === activeBase)) {
+      const activeEntry = pool.find((m) => m.id === activeBase);
+      if (activeEntry) list.unshift(activeEntry);
+    }
+  }
+
+  if (activeBase && list.some((m) => m.id === activeBase)) {
+    list.sort((a, b) => {
+      const aActive = a.id === activeBase ? 1 : 0;
+      const bActive = b.id === activeBase ? 1 : 0;
+      return bActive - aActive;
+    });
+  }
+
+  return list;
 }
