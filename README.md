@@ -28,7 +28,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
 - **Branch Selection Filter & Ref Context Menu**:
   - Toolbar dropdown selector supporting **All branches** (`--all`), **Current branch** (`HEAD`), and any explicit local or remote branch.
   - Clicking any branch badge directly in the commit table instantly isolates reachability to that branch.
-  - Right-clicking any branch badge (or a branch in the toolbar dropdown) opens a dedicated context menu: **Checkout Branch**, **Merge into Current Branch...** (disabled for the checked-out branch, confirmed before `git merge --no-edit`), **Delete Branch...** (with safe/force delete confirmation), and **Copy Branch Name**.
+  - Right-clicking any branch badge (or a branch in the toolbar dropdown) opens a dedicated context menu: **Checkout Branch**, **Merge into Current Branch...** (disabled for the checked-out branch, confirmed before `git merge --no-edit`), **Rename Branch...** (with an optional toggle to rename its paired remote branch), **Rename Remote Branch...** (pushes the new name, deletes the old one, and keeps local tracking in sync), **Delete Branch...** (with safe/force delete confirmation), **Delete Remote Branch...**, and **Copy Branch Name**.
 - **One-Click Remote Sync**:
   - Toolbar **Fetch**, **Pull**, and **Push** buttons beside the branch selector, each with a tooltip naming the exact command and target upstream.
   - The branch selector shows ahead/behind counts (`↑n` / `↓n`); the dropdown reports the tracked upstream.
@@ -167,7 +167,7 @@ or opening the Changes tab updates the Changes panel immediately with fresh stat
 folder regardless of where its terminals `cd`.
 
 ### Test Preview Props
-For headless testing or automated surface inspection, open specific overlays on first load using the `preview` prop (`"context-menu"`, `"branch-context-menu"`, `"dropdown"`, `"modal-branch"`, `"modal-tag"`, `"modal-reset"`, `"confirm-merge"`, `"modal-merge-branch"`, `"file-diff"`):
+For headless testing or automated surface inspection, open specific overlays on first load using the `preview` prop (`"context-menu"`, `"branch-context-menu"`, `"remote-branch-context-menu"`, `"dropdown"`, `"modal-branch"`, `"modal-tag"`, `"modal-reset"`, `"modal-rename-branch"`, `"modal-rename-remote-branch"`, `"modal-delete-remote-branch"`, `"confirm-merge"`, `"modal-merge-branch"`, `"file-diff"`):
 ```sh
 herdr-app do tab.new --mod git-graph --props '{"folder":"/tmp/repo","preview":"modal-branch"}'
 ```
