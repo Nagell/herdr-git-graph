@@ -33,6 +33,7 @@ import {
   run,
   terminals,
   layout,
+  closeOverlay,
 } from "herdr";
 import {
   countLines,
@@ -54,6 +55,7 @@ import {
   wrapSplitRows,
   isLayoutNodeVisible,
   isFreeModel,
+  isLightColor,
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
@@ -94,6 +96,13 @@ const CLEAN_AGENT_MODEL_PREFERENCE = [
 const CLEAN_AGENT_MODEL = CLEAN_AGENT_MODEL_PREFERENCE[0];
 const CLEAN_AGENT_MODEL_KEY = "git-graph.cleanAgentModel";
 const CLEAN_AGENT_LABEL = "AI commit worker";
+// The progress toast stays spinning until the worker settles; the timeout is
+// only a safety net (milliseconds). finishTreeAgent closes it as soon as the
+// commits land or the worker fails. GIF icons animate natively in the toast,
+// so the ring turns without a redraw timer.
+const CLEAN_AGENT_TOAST_TIMEOUT = 12 * 60 * 60 * 1000;
+const CLEAN_AGENT_SPINNER_ON_DARK = "mods/git-graph/icons/spinner-on-dark.gif";
+const CLEAN_AGENT_SPINNER_ON_LIGHT = "mods/git-graph/icons/spinner-on-light.gif";
 // When no curated preference matches, free models from these families are
 // listed first: they are the strongest at code edits and commit slicing.
 const CLEAN_AGENT_FAMILY_RANK = [
@@ -515,6 +524,8 @@ export default class GitGraph extends View {
   async close(_cx) {
     this.watched = null;
     this.watchToken = null;
+    // A closed graph tab must not leave a 12-hour progress toast behind.
+    this.closeTreeAgentToast(this.treeAgent);
   }
 
   /** Reads the one diff this tab was opened for, as a unified diff string. */
@@ -4785,6 +4796,41 @@ export default class GitGraph extends View {
     return `ses_gitgraph${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
   }
 
+  /** The spinner GIF that contrasts with the current theme's toast background. */
+  treeAgentSpinnerIcon() {
+    const t = theme();
+    return isLightColor(t?.popover ?? t?.surface ?? t?.background)
+      ? CLEAN_AGENT_SPINNER_ON_LIGHT
+      : CLEAN_AGENT_SPINNER_ON_DARK;
+  }
+
+  /**
+   * Shows the persistent progress toast while the AI worker runs. The GIF
+   * icon spins natively and the toast stays up until `closeTreeAgentToast`,
+   * so the person can see that the process is still happening.
+   *
+   * @param {{ address: string | null; name: string }} agent
+   * @param {string} model
+   * @returns {string} the toast overlay id
+   */
+  showTreeAgentProgressToast(agent, model) {
+    return notify({
+      title: `${CLEAN_AGENT_LABEL} is cleaning the tree`,
+      body: `${cleanModelLabel(model)} · click to peek`,
+      level: "info",
+      icon: this.treeAgentSpinnerIcon(),
+      timeout: CLEAN_AGENT_TOAST_TIMEOUT,
+      ...(agent.address ? { action: { name: "terminal.peek", args: { terminal: agent.address } } } : {}),
+    });
+  }
+
+  /** Dismisses the worker's progress toast once it is no longer running. */
+  closeTreeAgentToast(agent) {
+    if (!agent?.toastId) return;
+    closeOverlay(agent.toastId);
+    agent.toastId = null;
+  }
+
   /**
    * OpenCode Mini never reports OSC 7501 status, so poll its session. The
    * session is idle once `time.idle` is at or after `time.busy`. When it
@@ -4916,6 +4962,7 @@ export default class GitGraph extends View {
             agent.retryOffered = true;
             this.treeAgent = null;
             this.treeAgentStarting = false;
+            this.closeTreeAgentToast(agent);
             this.closeTreeAgentTab(agent);
 
             if (!agent.errorMessage && agent.sessionId) {
@@ -4993,13 +5040,14 @@ export default class GitGraph extends View {
     agent.finished = true;
     this.treeAgent = null;
     this.treeAgentStarting = false;
+    this.closeTreeAgentToast(agent);
     this.closeTreeAgentTab(agent);
     notify({
       title: "AI commit worker finished",
       body:
         commitCount > 0
-          ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · worker tab closed`
-          : "Working tree is clean · worker tab closed",
+          ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · background worker stopped`
+          : "Working tree is clean · background worker stopped",
       level: "success",
     });
     this.refresh(cx);
@@ -5152,7 +5200,7 @@ export default class GitGraph extends View {
         try {
           address = JSON.parse(r.stdout).address ?? null;
         } catch {}
-        this.treeAgent = {
+        const agent = {
           address,
           name,
           sessionId,
@@ -5166,15 +5214,10 @@ export default class GitGraph extends View {
           checking: false,
           finished: false,
           retryOffered: false,
+          toastId: null,
         };
-        notify({
-          title: `${CLEAN_AGENT_LABEL} is cleaning the tree`,
-          body: `${cleanModelLabel(model)} · started ${name} in the background${
-            address ? ` (${address})` : ""
-          }. The worker tab closes when the commits land.`,
-          level: "success",
-          ...(address ? { action: { name: "terminal.peek", args: { terminal: address } } } : {}),
-        });
+        this.treeAgent = agent;
+        agent.toastId = this.showTreeAgentProgressToast(agent, model);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         notify({
@@ -6777,7 +6820,7 @@ export default class GitGraph extends View {
               .child(this.remoteActionButton("push", t, cx))
           )
           .child(div().w(1).h(16).flex_none().bg(color(t.border)))
-          // AI commit worker (best free model, closes its tab when done)
+          // AI commit worker (best free model, persistent spinning toast)
           .child(this.treeAgentButton(t, cx, isCompact))
           // Search Box (Expanded when not compact, or when searchOpen in compact mode)
           .when(!isCompact, (e) =>
