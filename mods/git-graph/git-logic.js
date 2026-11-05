@@ -104,6 +104,24 @@ export function getStatusColor(status, t) {
 }
 
 /**
+ * Whether a `#rgb` / `#rrggbb` color is light enough to need dark ink.
+ * Used to pick the toast spinner that contrasts with the theme's popover.
+ *
+ * @param {string | null | undefined} value
+ * @returns {boolean}
+ */
+export function isLightColor(value) {
+  const raw = String(value || "").trim().replace(/^#/, "");
+  const full = raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return true;
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const channel = parseInt(full.slice(i, i + 2), 16) / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5;
+}
+
+/**
  * Parses decorated ref strings produced by `git log --decorate=full --format=%D`.
  * Correctly distinguishes local branches with slashes (e.g. refs/heads/feat/foo)
  * from remote branches (refs/remotes/origin/...) and filters out symbolic refs (origin/HEAD).

@@ -14,6 +14,7 @@ import {
   wrapInlineRows,
   wrapSplitRows,
   isFreeModel,
+  isLightColor,
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
@@ -482,6 +483,19 @@ test("isFreeModel and cleanModelLabel: correctly detect free models and format n
   assert.equal(cleanModelLabel("github-copilot/claude-haiku-5.5"), "Claude Haiku 5.5");
   assert.equal(cleanModelLabel("opencode/deepseek-v4.1-flash-free#low"), "DeepSeek V4.1 Flash Free");
   assert.equal(cleanModelLabel("google/gemini-2.5-flash"), "Gemini 2.5 Flash");
+});
+
+test("isLightColor: picks the contrasting toast spinner", () => {
+  assert.equal(isLightColor("#ffffff"), true);
+  assert.equal(isLightColor("#f5f5f5"), true);
+  assert.equal(isLightColor("#000000"), false);
+  assert.equal(isLightColor("#1e1e1e"), false);
+  assert.equal(isLightColor("#777"), false);
+  assert.equal(isLightColor("fff"), true);
+  // Invalid or missing colors use the light-background spinner (a dark ring),
+  // which stays visible when the theme cannot be read.
+  assert.equal(isLightColor(null), true);
+  assert.equal(isLightColor("not-a-color"), true);
 });
 
 test("resolveCleanAgentModelLogic: honors saved model even if paid over default free models", () => {
