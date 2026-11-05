@@ -32,6 +32,7 @@ import {
   readTextFile,
   run,
   terminals,
+  layout,
 } from "herdr";
 import {
   countLines,
@@ -49,6 +50,13 @@ import {
   buildDiffView,
   lineSegments,
   computeEffectiveRoot,
+  wrapInlineRows,
+  wrapSplitRows,
+  isLayoutNodeVisible,
+  isFreeModel,
+  cleanModelLabel,
+  resolveCleanAgentModelLogic,
+  filterVisibleCleanModels,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -143,40 +151,6 @@ function cleanProviderName(id) {
 /** The icon for a provider, with a generic fallback. */
 function cleanProviderIcon(id) {
   return CLEAN_PROVIDER_ICONS[String(id || "")] || "mods/git-graph/icons/provider.svg";
-}
-
-/** True for a model the OpenCode catalog offers without charge. */
-function isFreeModel(id) {
-  const base = String(id || "").split("#")[0];
-  return /(?:^|[/-])free(?:$|[/-])/.test(base) || base === "opencode/big-pickle";
-}
-
-/** A readable label for a `provider/model#variant` id. */
-function cleanModelLabel(id) {
-  const base = String(id || "").split("#")[0];
-  const name = base.split("/").pop() || base;
-  const special = {
-    claude: "Claude",
-    crouton: "Crouton",
-    deepseek: "DeepSeek",
-    flint: "Flint",
-    gemini: "Gemini",
-    glm: "GLM",
-    gpt: "GPT",
-    iceman: "Iceman",
-    kimi: "Kimi",
-    llama: "Llama",
-    mimo: "MiMo",
-    nemotron: "Nemotron",
-    pulse: "Pulse",
-    qwen: "Qwen",
-    sonnet: "Sonnet",
-  };
-  return name
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map((word) => special[word.toLowerCase()] || (word.length <= 3 ? word.toUpperCase() : word[0].toUpperCase() + word.slice(1)))
-    .join(" ");
 }
 
 /** @param {any} c @returns {`#${string}`} */
@@ -380,6 +354,10 @@ export default class GitGraph extends View {
           ? savedDiffView
           : "inline";
     this.diffView = diffView;
+    const requestedDiffWrap = typeof p.diffWrap === "boolean" ? p.diffWrap : null;
+    this.diffWrap = requestedDiffWrap ?? (shared("git-graph.diffWrap") === true);
+    this.diffDisplay = null;
+    this.diffDisplayKey = null;
 
     this.commits = [];
     this.filteredCommits = [];
@@ -415,6 +393,7 @@ export default class GitGraph extends View {
     this.context = null;
     this.watched = null;
     this.watchToken = null;
+    this.wasVisible = false;
 
     this.searchQuery = "";
     this.searchOpen = false;
@@ -460,8 +439,17 @@ export default class GitGraph extends View {
     if (this.diffMode) {
       this.diffScroll = VirtualListScrollHandle.new();
       this.loadDiffTab(cx);
+      this.wasVisible = this.isViewVisible();
       // Only a working-tree diff can change under us; a commit's cannot.
-      if (this.diffKind === "worktree") cx.timer.every(10000, (cx) => this.loadDiffTab(cx));
+      if (this.diffKind === "worktree") {
+        cx.timer.every(10000, (cx) => this.loadDiffTab(cx));
+        cx.timer.every(100, (cx) => {
+          const visible = this.isViewVisible();
+          const justOpened = visible && !this.wasVisible;
+          this.wasVisible = visible;
+          if (justOpened) this.loadDiffTab(cx);
+        });
+      }
       return;
     }
 
@@ -493,13 +481,19 @@ export default class GitGraph extends View {
       }
     });
 
+    this.wasVisible = this.isViewVisible();
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
-    // Switching spaces does not re-render the panel by itself: watch the
-    // resolved location (in memory only, no git) so the graph follows the
-    // selected space at once instead of waiting for the next full refresh.
+    // Switching spaces or opening the Changes panel does not re-render the
+    // panel by itself: watch visibility and location (in memory only, no git)
+    // so the graph reloads automatically as soon as it opens or changes.
     cx.timer.every(100, (cx) => {
-      if (this.getKey() !== this.context) this.refresh(cx);
+      const visible = this.isViewVisible();
+      const justOpened = visible && !this.wasVisible;
+      this.wasVisible = visible;
+      if (justOpened || this.getKey() !== this.context) {
+        this.refresh(cx);
+      }
     });
   }
 
@@ -599,6 +593,7 @@ export default class GitGraph extends View {
           this.diffRows = view.inline;
           this.diffLeft = view.left;
           this.diffRight = view.right;
+          this.diffDisplayKey = null;
           this.diffAdd = this.diffRows.filter((row) => row.kind === "+").length;
           this.diffDel = this.diffRows.filter((row) => row.kind === "-").length;
           const longest = this.diffRows.reduce((n, row) => Math.max(n, row.text.length), 0);
@@ -656,6 +651,51 @@ export default class GitGraph extends View {
     this.diffView = mode;
     setShared("git-graph.diffView", mode);
     cx.notify();
+  }
+
+  /** Turns soft wrapping on or off for diff lines. */
+  setDiffWrap(wrap, cx) {
+    if (this.diffWrap === wrap) return;
+    this.diffWrap = wrap;
+    setShared("git-graph.diffWrap", wrap);
+    cx.notify();
+  }
+
+  /** Approximate code-point width available to one wrapped diff line. */
+  diffColumns(panes) {
+    const width = this.width > 0 ? this.width : 1200;
+    const paneWidth = width / panes;
+    const gutter = this.diffView === "inline" ? 132 : 76;
+    return Math.max(1, Math.floor((paneWidth - gutter) / 7.6));
+  }
+
+  /**
+   * The rows the visible diff list draws: the parsed rows when wrapping is
+   * off, or their wrapped display rows when it is on. Cached per layout, row
+   * set and width so scrolling and repainting do not re-wrap every frame.
+   */
+  diffDisplayRows() {
+    const panes = this.diffView === "split" ? 2 : 1;
+    const columns = this.diffColumns(panes);
+    const key = `${this.diffWrap ? "wrap" : "scroll"}|${this.diffView}|${columns}|${this.diffRows.length}|${this.diffLeft.length}`;
+    if (this.diffDisplayKey === key) return this.diffDisplay;
+
+    /** @type {Record<string, any>} */
+    let display;
+    if (this.diffView === "inline") {
+      display = {
+        inline: this.diffWrap ? wrapInlineRows(this.diffRows, columns) : this.diffRows,
+      };
+    } else {
+      const split = this.diffWrap
+        ? wrapSplitRows(this.diffLeft, this.diffRight, columns)
+        : { left: this.diffLeft, right: this.diffRight };
+      display = { left: split.left, right: split.right };
+    }
+
+    this.diffDisplayKey = key;
+    this.diffDisplay = display;
+    return display;
   }
 
   /** Theme color for a token kind emitted by the diff highlighter. */
@@ -754,6 +794,7 @@ export default class GitGraph extends View {
           .flex_1()
           .min_w(0)
           .items_center()
+          .overflow_hidden()
           .children(
             lineSegments(row.spans, row.changes).map((span) =>
               div()
@@ -860,7 +901,8 @@ export default class GitGraph extends View {
    * them together; each keeps its own horizontal scrollbar.
    */
   renderSplitPane(side, t) {
-    const rows = side === "old" ? this.diffLeft : this.diffRight;
+    const display = this.diffDisplayRows();
+    const rows = side === "old" ? display.left : display.right;
     const width = side === "old" ? this.diffLeftWidth : this.diffRightWidth;
     const id = side === "old" ? "diff-split-old" : "diff-split-new";
 
@@ -881,11 +923,12 @@ export default class GitGraph extends View {
             div()
               .size_full()
               .min_w(0)
-              .overflow_x_scrollbar()
+              .when(!this.diffWrap, (e) => e.overflow_x_scrollbar())
+              .when(this.diffWrap, (e) => e.overflow_hidden())
               .child(
                 div()
                   .w_full()
-                  .min_w(width)
+                  .when(!this.diffWrap, (e) => e.min_w(width))
                   .h_full()
                   .child(
                     v_virtual_list(id, rows.length, 22, (i) => String(i), (range) =>
@@ -902,6 +945,7 @@ export default class GitGraph extends View {
 
   /** The inline diff, as a single virtualized column with full-width scrolling. */
   renderInlineDiff(t) {
+    const rows = this.diffDisplayRows().inline;
     return div()
       .flex_1()
       .min_h(0)
@@ -912,19 +956,20 @@ export default class GitGraph extends View {
         div()
           .id("diff-scroll-x")
           .size_full()
-          .overflow_x_scrollbar()
+          .when(!this.diffWrap, (e) => e.overflow_x_scrollbar())
+          .when(this.diffWrap, (e) => e.overflow_hidden())
           .child(
             div()
               .w_full()
-              .min_w(this.diffWidth)
+              .when(!this.diffWrap, (e) => e.min_w(this.diffWidth))
               .h_full()
               .child(
                 v_virtual_list(
                   "diff-rows",
-                  this.diffRows.length,
+                  rows.length,
                   22,
                   (i) => String(i),
-                  (range) => this.diffRows.slice(range.start, range.end).map((row) => this.diffRow(row, t))
+                  (range) => rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))
                 ).size_full()
               )
           )
@@ -999,6 +1044,35 @@ export default class GitGraph extends View {
       .child(label);
   }
 
+  /** The wrap toggle that sits beside the layout switcher. */
+  diffWrapButton(t, cx) {
+    const active = this.diffWrap;
+    return div()
+      .id("diff-wrap")
+      .px(7)
+      .py(2)
+      .rounded(4)
+      .text_size(10)
+      .cursor_pointer()
+      .when(active, (e) => e.bg(color(t.selected)).text_color(color(t.foreground)))
+      .when(!active, (e) => e.text_color(color(t.dim)))
+      .hover((s) => s.bg(color(active ? t.selected : t.hover)))
+      .tooltip(active ? "Wrap long lines to the pane width" : "Scroll long lines horizontally instead of wrapping")
+      .on_click((_e, cx) => this.setDiffWrap(!this.diffWrap, cx))
+      .child("Wrap");
+  }
+
+  /** Records the view size; wrapping needs the current pane width. */
+  updateSize(size, cx) {
+    const w = size && typeof size.width === "number" ? Math.round(size.width) : 0;
+    const h = size && typeof size.height === "number" ? Math.round(size.height) : 0;
+    if (w !== this.width || h !== this.height) {
+      this.width = w;
+      this.height = h;
+      cx.notify();
+    }
+  }
+
   /** The full-size diff view a "Diff · <file>" tab renders. */
   renderDiffTab(cx) {
     const t = theme();
@@ -1015,6 +1089,7 @@ export default class GitGraph extends View {
       .bg(color(t.background))
       .text_color(color(t.foreground))
       .text_size(13)
+      .on_size_change((size, cx) => this.updateSize(size, cx))
       .child(
         h_flex()
           .h(38)
@@ -1056,6 +1131,8 @@ export default class GitGraph extends View {
               .child(this.diffViewButton("inline", "Inline", "Old and new lines stacked in one column", t, cx))
               .child(this.diffViewButton("split", "Split", "Old and new side by side", t, cx))
               .child(this.diffViewButton("stacked", "Stacked", "Old above new, both panes in sync", t, cx))
+              .child(div().w(1).h(12).mx(2).bg(color(t.border)))
+              .child(this.diffWrapButton(t, cx))
           )
           .child(
             h_flex()
@@ -1162,6 +1239,24 @@ export default class GitGraph extends View {
     const loc = this.getLocation();
     const effectiveRoot = computeEffectiveRoot(this.root, loc.cwd);
     return JSON.stringify({ root: effectiveRoot, on: loc.on });
+  }
+
+  isViewVisible() {
+    const p = props();
+    if (p?.panel) {
+      const root = layout();
+      return isLayoutNodeVisible(root, (n) => n?.id === "changes" || n?.content?.mod === "git-graph");
+    }
+    const space = spaces().find((s) => s.active);
+    if (!space) return false;
+    const activeTab = (space.tabs ?? []).find((t) => t.active);
+    if (!activeTab) return false;
+    const allPanes = panes();
+    if (p?.pane) {
+      const myPane = allPanes.find((pane) => pane.pane === p.pane);
+      if (myPane) return myPane.tab === activeTab.id;
+    }
+    return allPanes.some((pane) => pane.tab === activeTab.id && pane.mod === "git-graph");
   }
 
   /**
@@ -4200,7 +4295,13 @@ export default class GitGraph extends View {
     } catch {
       // Fall through to the known free list.
     }
-    if (!ids.length) ids = CLEAN_AGENT_MODEL_PREFERENCE.map((id) => id.split("#")[0]);
+    if (!ids.length) {
+      ids = CLEAN_AGENT_MODEL_PREFERENCE.map((id) => id.split("#")[0]);
+      const saved = this.treeAgentModel || shared(CLEAN_AGENT_MODEL_KEY);
+      if (saved && !ids.includes(saved.split("#")[0])) {
+        ids.unshift(saved.split("#")[0]);
+      }
+    }
     const models = ids
       .filter((id) => /^[^\s/]+\/[^\s]+$/.test(id))
       .map((id) => ({
@@ -4225,16 +4326,12 @@ export default class GitGraph extends View {
    * model is only ever used when the person chose it explicitly.
    */
   resolveCleanAgentModel(models, override = null) {
-    const baseOf = (id) => String(id || "").split("#")[0];
-    const has = (id) => Boolean(id) && models.some((m) => m.id === baseOf(id));
-    if (override && has(override)) return override;
-    const saved = shared(CLEAN_AGENT_MODEL_KEY);
-    if (has(saved)) return saved;
-    for (const candidate of CLEAN_AGENT_MODEL_PREFERENCE) {
-      if (has(candidate)) return candidate;
-    }
-    const free = models.find((m) => m.free);
-    return free ? free.id : null;
+    const saved = this.treeAgentModel || shared(CLEAN_AGENT_MODEL_KEY);
+    return resolveCleanAgentModelLogic(models, {
+      override,
+      saved,
+      preferences: CLEAN_AGENT_MODEL_PREFERENCE,
+    });
   }
 
   /** Models from the selected provider tab, or everything on the All tab. */
@@ -4243,16 +4340,14 @@ export default class GitGraph extends View {
     return dialog.provider ? models.filter((m) => m.provider === dialog.provider) : models;
   }
 
-  /** What the picker shows: provider tab + search, then free-only or all. */
+  /** What the picker shows: provider tab + search, then free-only or all, with active pinned. */
   cleanVisibleModels(dialog) {
-    const pool = this.cleanProviderPool(dialog);
-    const query = String(dialog.search || "").trim().toLowerCase();
-    if (query) {
-      return pool.filter(
-        (m) => m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
-      );
-    }
-    return dialog.showAll ? pool : pool.filter((m) => m.free);
+    return filterVisibleCleanModels(dialog.models, {
+      provider: dialog.provider,
+      query: dialog.search,
+      showAll: dialog.showAll,
+      activeModel: dialog.activeModel,
+    });
   }
 
   /** Provider tabs with their icons, like a compact browser tab strip. */
@@ -4305,7 +4400,11 @@ export default class GitGraph extends View {
           const pool = this.cleanProviderPool(dialog);
           if (id && !pool.some((m) => m.free)) dialog.showAll = true;
           const visible = this.cleanVisibleModels(dialog);
-          if (!visible.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
+          const selBase = String(dialog.selected || "").split("#")[0];
+          const activeBase = String(dialog.activeModel || "").split("#")[0];
+          if (activeBase && visible.some((m) => m.id === activeBase) && (!selBase || selBase === activeBase)) {
+            dialog.selected = dialog.activeModel;
+          } else if (!visible.some((m) => m.id === selBase)) {
             dialog.selected = visible[0]?.id || null;
           }
           cx.notify();
@@ -4342,10 +4441,12 @@ export default class GitGraph extends View {
     const root = this.root || location.cwd;
     const on = this.on ?? location.on;
     const searchInput = InputState.new({ placeholder: "Search models…" });
+    const currentModel = this.cleanAgentModelLabel();
     const dialog = {
       type: "clean-model",
       models: [],
-      selected: null,
+      selected: currentModel,
+      activeModel: currentModel,
       search: "",
       searchInput,
       provider,
@@ -4358,21 +4459,14 @@ export default class GitGraph extends View {
     this.modalTagMessageInput = null;
     searchInput.on("change", (_e, cx) => {
       if (this.modalDialog !== dialog) return;
-      const query = searchInput.value().trim();
-      dialog.search = query;
-      if (query) {
-        const lower = query.toLowerCase();
-        const matches = this.cleanProviderPool(dialog).filter(
-          (m) => m.id.toLowerCase().includes(lower) || m.label.toLowerCase().includes(lower)
-        );
-        if (!matches.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
-          dialog.selected = matches[0]?.id || null;
-        }
-      } else {
-        const visible = this.cleanVisibleModels(dialog);
-        if (!visible.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
-          dialog.selected = visible[0]?.id || null;
-        }
+      dialog.search = searchInput.value().trim();
+      const visible = this.cleanVisibleModels(dialog);
+      const selBase = String(dialog.selected || "").split("#")[0];
+      const activeBase = String(dialog.activeModel || "").split("#")[0];
+      if (activeBase && visible.some((m) => m.id === activeBase) && (!selBase || selBase === activeBase)) {
+        dialog.selected = dialog.activeModel;
+      } else if (!visible.some((m) => m.id === selBase)) {
+        dialog.selected = visible[0]?.id || null;
       }
       cx.notify();
     });
@@ -4384,15 +4478,15 @@ export default class GitGraph extends View {
       const models = await this.loadCleanAgentModels(root, on, { force: true });
       if (this.modalDialog !== dialog) return;
       dialog.models = models;
-      const pool = this.cleanProviderPool(dialog);
-      const freeModels = pool.filter((m) => m.free);
-      dialog.showAll = freeModels.length === 0;
-      const resolved = this.resolveCleanAgentModel(pool, shared(CLEAN_AGENT_MODEL_KEY));
+      const activeModel = this.resolveCleanAgentModel(models, currentModel);
+      dialog.activeModel = activeModel;
       const visible = this.cleanVisibleModels(dialog);
-      const resolvedBase = String(resolved || "").split("#")[0];
-      dialog.selected = visible.some((m) => m.id === resolvedBase)
-        ? resolved
-        : visible[0]?.id || null;
+      const activeBase = String(activeModel || "").split("#")[0];
+      if (activeModel && visible.some((m) => m.id === activeBase)) {
+        dialog.selected = activeModel;
+      } else {
+        dialog.selected = visible[0]?.id || null;
+      }
       dialog.loading = false;
       if (!models.length) dialog.error = error || "No OpenCode models were found.";
       cx.notify();
@@ -5341,46 +5435,84 @@ export default class GitGraph extends View {
           .child(
             v_flex()
               .flex_none()
-              .gap(3)
+              .gap(4)
               .child(
-                div()
-                  .font_semibold()
-                  .text_size(13)
-                  .text_color(color(t.foreground))
+                h_flex()
+                  .items_center()
+                  .justify_between()
+                  .gap(8)
                   .child(
-                    dialog.type === "clean-model"
-                      ? "AI commit model"
-                      : dialog.type === "stash"
-                      ? dialog.stashStaged
-                        ? "Stash Staged Changes"
-                        : "Stash All Changes"
-                      : dialog.type === "unstash"
-                      ? `Unstash ${dialog.stashRef || "Latest"}`
-                      : dialog.type === "drop-stash"
-                      ? `Drop ${dialog.stashRef || "Stash"}`
-                      : dialog.type === "publish"
-                      ? "Publish to GitHub"
-                      : dialog.type === "branch"
-                      ? `Create Branch at ${commit.shortHash}`
-                      : dialog.type === "tag"
-                      ? `Add Tag at ${commit.shortHash}`
-                      : dialog.type === "reset"
-                      ? `Reset '${this.currentBranch || "HEAD"}' to ${commit.shortHash}`
-                      : dialog.type === "confirm-checkout"
-                      ? `Checkout Commit ${commit.shortHash}`
-                      : dialog.type === "confirm-cherry-pick"
-                      ? `Cherry-pick Commit ${commit.shortHash}`
-                      : dialog.type === "confirm-revert"
-                      ? `Revert Commit ${commit.shortHash}`
-                      : dialog.type === "confirm-merge"
-                      ? `Merge into '${this.currentBranch || "HEAD"}'`
-                      : dialog.type === "confirm-merge-branch"
-                      ? `Merge '${dialog.ref?.text || "branch"}' into '${this.currentBranch || "HEAD"}'`
-                      : dialog.type === "confirm-rebase"
-                      ? `Rebase '${this.currentBranch || "HEAD"}' on ${commit.shortHash}`
-                      : dialog.type === "confirm-delete-branch"
-                      ? `Delete Branch '${dialog.ref?.text}'`
-                      : "Confirm Action"
+                    div()
+                      .font_semibold()
+                      .text_size(13)
+                      .text_color(color(t.foreground))
+                      .child(
+                        dialog.type === "clean-model"
+                          ? "AI commit model"
+                          : dialog.type === "stash"
+                          ? dialog.stashStaged
+                            ? "Stash Staged Changes"
+                            : "Stash All Changes"
+                          : dialog.type === "unstash"
+                          ? `Unstash ${dialog.stashRef || "Latest"}`
+                          : dialog.type === "drop-stash"
+                          ? `Drop ${dialog.stashRef || "Stash"}`
+                          : dialog.type === "publish"
+                          ? "Publish to GitHub"
+                          : dialog.type === "branch"
+                          ? `Create Branch at ${commit.shortHash}`
+                          : dialog.type === "tag"
+                          ? `Add Tag at ${commit.shortHash}`
+                          : dialog.type === "reset"
+                          ? `Reset '${this.currentBranch || "HEAD"}' to ${commit.shortHash}`
+                          : dialog.type === "confirm-checkout"
+                          ? `Checkout Commit ${commit.shortHash}`
+                          : dialog.type === "confirm-cherry-pick"
+                          ? `Cherry-pick Commit ${commit.shortHash}`
+                          : dialog.type === "confirm-revert"
+                          ? `Revert Commit ${commit.shortHash}`
+                          : dialog.type === "confirm-merge"
+                          ? `Merge into '${this.currentBranch || "HEAD"}'`
+                          : dialog.type === "confirm-merge-branch"
+                          ? `Merge '${dialog.ref?.text || "branch"}' into '${this.currentBranch || "HEAD"}'`
+                          : dialog.type === "confirm-rebase"
+                          ? `Rebase '${this.currentBranch || "HEAD"}' on ${commit.shortHash}`
+                          : dialog.type === "confirm-delete-branch"
+                          ? `Delete Branch '${dialog.ref?.text}'`
+                          : "Confirm Action"
+                      )
+                  )
+                  .when(
+                    dialog.type === "clean-model" && Boolean(dialog.activeModel || this.cleanAgentModelLabel()),
+                    (el) => {
+                      const cur = dialog.activeModel || this.cleanAgentModelLabel();
+                      return el.child(
+                        h_flex()
+                          .id("model-active-badge")
+                          .px(6)
+                          .py(1.5)
+                          .gap(4)
+                          .rounded(4)
+                          .items_center()
+                          .bg(color(t.accent + "18"))
+                          .border_1()
+                          .border_color(color(t.accent + "44"))
+                          .tooltip(`Currently active model: ${cur}`)
+                          .child(
+                            div()
+                              .text_size(9)
+                              .text_color(color(t.muted))
+                              .child("Active:")
+                          )
+                          .child(
+                            div()
+                              .text_size(9.5)
+                              .font_medium()
+                              .text_color(color(t.accent))
+                              .child(cleanModelLabel(cur))
+                          )
+                      );
+                    }
                   )
               )
               .child(
@@ -5389,7 +5521,7 @@ export default class GitGraph extends View {
                   .text_color(color(t.muted))
                   .child(
                     dialog.type === "clean-model"
-                      ? "Pick a provider tab or search any model. Free models come first; use Show all to browse the rest."
+                      ? `Currently configured to use ${cleanModelLabel(dialog.activeModel || this.cleanAgentModelLabel())}. Choose a model or click Start agent.`
                       : dialog.type === "stash"
                       ? dialog.stashStaged
                         ? "Save only the staged changes to a new stash, leaving unstaged edits in place"
@@ -5541,7 +5673,11 @@ export default class GitGraph extends View {
                             dialog.searchInput?.set_value("");
                             dialog.search = "";
                             const visible = this.cleanVisibleModels(dialog);
-                            if (!visible.some((m) => m.id === String(dialog.selected || "").split("#")[0])) {
+                            const selBase = String(dialog.selected || "").split("#")[0];
+                            const activeBase = String(dialog.activeModel || "").split("#")[0];
+                            if (activeBase && visible.some((m) => m.id === activeBase) && (!selBase || selBase === activeBase)) {
+                              dialog.selected = dialog.activeModel;
+                            } else if (!visible.some((m) => m.id === selBase)) {
                               dialog.selected = visible[0]?.id || null;
                             }
                             cx.notify();
@@ -5591,6 +5727,7 @@ export default class GitGraph extends View {
                           .children(
                             shownModels.map((m, i) => {
                               const active = selectedBase === m.id;
+                              const isActiveModel = m.id === String(dialog.activeModel || "").split("#")[0];
                               return h_flex()
                                 .id(`model-opt-${i}`)
                                 .flex_none()
@@ -5622,6 +5759,20 @@ export default class GitGraph extends View {
                                         .child(m.label)
                                     )
                                     .child(div().truncate().text_size(9).text_color(color(t.muted)).child(m.id))
+                                )
+                                .when(isActiveModel, (el) =>
+                                  el.child(
+                                    div()
+                                      .px(4)
+                                      .py(1)
+                                      .rounded(3)
+                                      .bg(color(t.accent + "22"))
+                                      .text_size(8)
+                                      .font_semibold()
+                                      .text_color(color(t.accent))
+                                      .tooltip("Currently active model")
+                                      .child("ACTIVE")
+                                  )
                                 )
                                 .when(m.free, (el) =>
                                   el.child(
@@ -5655,12 +5806,13 @@ export default class GitGraph extends View {
                             .hover((s) => s.bg(color(t.hover)))
                             .on_click((_e, cx) => {
                               dialog.showAll = !dialog.showAll;
-                              if (
-                                !dialog.showAll &&
-                                selectedBase &&
-                                !freeModels.some((m) => m.id === selectedBase)
-                              ) {
-                                dialog.selected = freeModels[0]?.id || null;
+                              const visible = this.cleanVisibleModels(dialog);
+                              const selBase = String(dialog.selected || "").split("#")[0];
+                              const activeBase = String(dialog.activeModel || "").split("#")[0];
+                              if (activeBase && visible.some((m) => m.id === activeBase) && (!selBase || selBase === activeBase)) {
+                                dialog.selected = dialog.activeModel;
+                              } else if (!visible.some((m) => m.id === selBase)) {
+                                dialog.selected = visible[0]?.id || null;
                               }
                               cx.notify();
                             })
@@ -5992,6 +6144,15 @@ export default class GitGraph extends View {
                   .text_color(color(t.solid_foreground))
                   .text_size(11)
                   .font_semibold()
+                  .when(dialog.type === "clean-model", (el) => {
+                    const chosen = dialog.selected || dialog.activeModel;
+                    const clean = !this.workingTreeFiles.length && !this.inProgressOp;
+                    return el.tooltip(
+                      chosen
+                        ? `${clean ? "Save" : "Start AI worker with"} ${cleanModelLabel(chosen)}`
+                        : "Choose a model first"
+                    );
+                  })
                   .on_click((_e, cx) => this.submitModal(cx))
                   .child(
                     this.busy
@@ -6005,7 +6166,11 @@ export default class GitGraph extends View {
                         ? "Dropping…"
                         : "Working…"
                       : dialog.type === "clean-model"
-                      ? "Start agent"
+                      ? (!this.workingTreeFiles.length && !this.inProgressOp
+                          ? "Save model"
+                          : dialogWidth >= 340
+                          ? `Start agent (${cleanModelLabel(dialog.selected || dialog.activeModel)})`
+                          : "Start agent")
                       : dialog.type === "stash"
                       ? dialog.stashStaged
                         ? "Stash Staged"
@@ -6102,8 +6267,18 @@ export default class GitGraph extends View {
   }
 
   render(cx) {
-    if (this.diffMode) return this.renderDiffTab(cx);
-    if (this.getKey() !== this.context) this.refresh(cx);
+    if (this.diffMode) {
+      const visible = this.isViewVisible();
+      const justOpened = visible && !this.wasVisible;
+      this.wasVisible = visible;
+      // Never reload (and notify) during the render pass; defer to the loop.
+      if (justOpened && this.diffKind === "worktree") cx.spawn(async (cx) => this.loadDiffTab(cx));
+      return this.renderDiffTab(cx);
+    }
+    const visible = this.isViewVisible();
+    const justOpened = visible && !this.wasVisible;
+    this.wasVisible = visible;
+    if (justOpened || this.getKey() !== this.context) this.refresh(cx);
     const t = theme();
     const p = props();
     // Docked in a layout panel (Herdr's Changes slot, for example): draw a card
@@ -6153,15 +6328,7 @@ export default class GitGraph extends View {
           this.rootOrigin = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
         }
       })
-      .on_size_change((size, cx) => {
-        const w = size && typeof size.width === "number" ? Math.round(size.width) : 0;
-        const h = size && typeof size.height === "number" ? Math.round(size.height) : 0;
-        if (w !== this.width || h !== this.height) {
-          this.width = w;
-          this.height = h;
-          cx.notify();
-        }
-      })
+      .on_size_change((size, cx) => this.updateSize(size, cx))
       // In-progress Operation Banner
       .when(Boolean(this.inProgressOp), (e) => e.child(this.renderInProgressBanner(t, cx)))
       // Toolbar
