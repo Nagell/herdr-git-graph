@@ -4242,6 +4242,9 @@ export default class GitGraph extends View {
                     this.branchDropdownOpen = false;
                     if (this.treeAgentBusy() && this.treeAgent?.address) {
                       run("terminal.peek", { terminal: this.treeAgent.address });
+                      if (!this.treeAgent.toastId) {
+                        this.treeAgent.toastId = this.showTreeAgentProgressToast(this.treeAgent, this.treeAgent.model);
+                      }
                       return;
                     }
                     this.startTreeAgent(cx);
@@ -4896,7 +4899,18 @@ export default class GitGraph extends View {
       level: "info",
       icon: this.treeAgentSpinnerIcon(),
       timeout: CLEAN_AGENT_TOAST_TIMEOUT,
-      ...(agent.address ? { action: { name: "terminal.peek", args: { terminal: agent.address } } } : {}),
+      keepOpen: true,
+      persistent: true,
+      ...(agent.address
+        ? {
+            action: {
+              name: "terminal.peek",
+              args: { terminal: agent.address },
+              close: false,
+              dismiss: false,
+            },
+          }
+        : {}),
     });
   }
 
@@ -5363,6 +5377,9 @@ export default class GitGraph extends View {
       .on_click((_e, cx) => {
         if (busy && this.treeAgent?.address) {
           run("terminal.peek", { terminal: this.treeAgent.address });
+          if (!this.treeAgent.toastId) {
+            this.treeAgent.toastId = this.showTreeAgentProgressToast(this.treeAgent, this.treeAgent.model);
+          }
           return;
         }
         if (this.opencodeInstalled === false) {
