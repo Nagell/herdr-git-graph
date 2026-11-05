@@ -296,6 +296,34 @@ test("computeLanes: color index stays stable along first-parent chain", () => {
   }
 });
 
+test("computeLanes: side branch parent does not reuse merge commit lane or flip rail colors", () => {
+  // Scenario matching Image 4 / autojudge:
+  // main merges dev (m_dev); dev merges fix (c_fix); both dev and fix branch from base.
+  const commits = [
+    { hash: "m_main", parents: ["base", "m_dev"] },
+    { hash: "m_dev", parents: ["base", "c_fix"] },
+    { hash: "c_fix", parents: ["base"] },
+    { hash: "base", parents: [] },
+  ];
+  computeLanes(commits);
+
+  assert.equal(commits[0].lane, 0, "m_main is at lane 0");
+  assert.equal(commits[1].lane, 1, "m_dev is at lane 1");
+  assert.equal(commits[2].lane, 2, "c_fix is placed in a separate lane (lane 2), not lane 1");
+  assert.equal(commits[3].lane, 0, "base is at lane 0");
+
+  // Verify that m_dev at lane 1 does not have a vertical straight edge (1->1) with a different color.
+  const mDevDown = commits[1].edgesDown;
+  const straightSameLane = mDevDown.find((e) => e.from === 1 && e.to === 1);
+  assert.ok(!straightSameLane, "lane 1 should terminate or curve off, never switch colors in-place");
+
+  // Verify that c_fix parent connection comes from lane 1 to lane 2
+  const fixConn = commits[1].parentConnections.find((p) => p.parentHash === "c_fix");
+  assert.ok(fixConn);
+  assert.equal(fixConn.toLane, 2);
+  assert.equal(commits[2].colorIdx, fixConn.colorIdx);
+});
+
 test("buildDiffView: left and right columns have equal length for unbalanced hunk", () => {
   const diff = `@@ -1,5 +1,3 @@
  context 1

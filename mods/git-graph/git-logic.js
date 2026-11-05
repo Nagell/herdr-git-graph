@@ -423,8 +423,16 @@ export function computeLanes(commits) {
             terminated: false,
           });
         } else {
-          let newLane = activeLanes.indexOf(null);
-          const newColor = nextColorIdx++;
+          // A side branch (or branch whose direct lane is unavailable) must not reuse
+          // the commit's own lane, which would cause an abrupt color switch on a straight rail.
+          let newLane = -1;
+          for (let l = 0; l < activeLanes.length; l++) {
+            if (activeLanes[l] === null && l !== lane) {
+              newLane = l;
+              break;
+            }
+          }
+          const newColor = pIdx === 0 ? colorIdx : nextColorIdx++;
           if (newLane === -1) {
             newLane = activeLanes.length;
             activeLanes.push(pHash);
