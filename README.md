@@ -42,7 +42,8 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Right-click the AI button (or use **AI commit model…** in the branch dropdown) to choose a model from a scrollable, searchable picker with provider tabs. If no free model can start or the worker stops before finishing, the picker opens automatically.
   - The agent resolves merge/rebase/cherry-pick/revert conflicts, completes the operation, and turns the remaining changes into atomic Conventional Commits using the `git-change-workflow` skill.
   - It works on the current branch only and is explicitly told never to push, fetch, force-push, rewrite history, or discard work. The button disables when the tree is clean, HEAD is detached, or the launched agent is still running; the toast opens its terminal.
-  - When the commits land and the tree is clean, the worker tab closes itself and the toast reports how many commits were created.
+  - Starting it keeps a spinning progress toast on screen for the whole run; the toast is dismissed when the worker settles.
+  - When the commits land and the tree is clean, the progress toast is dismissed and a success toast reports how many commits were created.
 - **Stash Rows**:
   - Every `git stash` entry renders above the working tree as its own row: hollow stash node, `stash@{n}` pill, reflog subject, relative date, author, and stash commit.
   - Clicking a stash shows its changed files in the details tree and opens normal diff tabs. Right-click for **Unstash (Pop)**, **Apply Stash (Keep)**, **Drop Stash**, and copy actions.
