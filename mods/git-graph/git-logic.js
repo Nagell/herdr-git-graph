@@ -684,6 +684,45 @@ export function logArgs(branchFilter, commitLimit = 500) {
   return args;
 }
 
+/**
+ * Splits a remote branch reference name (e.g. "origin/main", "origin/feat/nested", "upstream/dev")
+ * into its remote and branch components based on configured remotes or the first slash.
+ *
+ * @param {string} refText
+ * @param {string[]} [remotes=[]]
+ * @returns {{ remote: string, branch: string }}
+ */
+export function splitRemoteBranch(refText, remotes = []) {
+  if (!refText) return { remote: "origin", branch: "" };
+  const sortedRemotes = Array.isArray(remotes)
+    ? remotes.slice().sort((a, b) => b.length - a.length)
+    : [];
+  for (const r of sortedRemotes) {
+    if (refText.startsWith(`${r}/`)) {
+      return { remote: r, branch: refText.slice(r.length + 1) };
+    }
+  }
+  const slashIdx = refText.indexOf("/");
+  if (slashIdx !== -1) {
+    return {
+      remote: refText.slice(0, slashIdx),
+      branch: refText.slice(slashIdx + 1),
+    };
+  }
+  return { remote: "origin", branch: refText };
+}
+
+/**
+ * Builds safe arguments for deleting a remote branch via `git push`.
+ *
+ * @param {string} remote
+ * @param {string} branch
+ * @returns {string[]}
+ */
+export function deleteRemoteBranchArgs(remote, branch) {
+  return ["push", remote, "--delete", "--end-of-options", branch];
+}
+
 // --- Diff syntax highlighting -------------------------------------------
 
 const KEYWORDS = {

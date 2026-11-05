@@ -20,6 +20,8 @@ import {
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
+  splitRemoteBranch,
+  deleteRemoteBranchArgs,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
 } from "../mods/git-graph/git-logic.js";
@@ -579,6 +581,67 @@ test("OPENCODE_INSTALL_CMD and OPENCODE_DOCS_URL constants are properly defined"
   assert.equal(OPENCODE_DOCS_URL, "https://opencode.ai/docs/");
 });
 
+test("splitRemoteBranch: cleanly extracts remote and branch name across remotes and slashes", () => {
+  // Simple branch on origin
+  assert.deepEqual(splitRemoteBranch("origin/main", ["origin"]), {
+    remote: "origin",
+    branch: "main",
+  });
+
+  // Nested branch name on origin
+  assert.deepEqual(splitRemoteBranch("origin/feat/nested-feature", ["origin"]), {
+    remote: "origin",
+    branch: "feat/nested-feature",
+  });
+
+  // Multiple remotes, matching non-default remote
+  assert.deepEqual(splitRemoteBranch("upstream/feat/login", ["origin", "upstream"]), {
+    remote: "upstream",
+    branch: "feat/login",
+  });
+
+  // Prefix remote matching (e.g. origin vs origin-backup)
+  assert.deepEqual(splitRemoteBranch("origin-backup/main", ["origin", "origin-backup"]), {
+    remote: "origin-backup",
+    branch: "main",
+  });
+
+  // Fallback when remotes list is empty or doesn't match
+  assert.deepEqual(splitRemoteBranch("custom/patch-1", []), {
+    remote: "custom",
+    branch: "patch-1",
+  });
+
+  // No slash fallback
+  assert.deepEqual(splitRemoteBranch("feature", ["origin"]), {
+    remote: "origin",
+    branch: "feature",
+  });
+
+  // Empty string
+  assert.deepEqual(splitRemoteBranch("", ["origin"]), {
+    remote: "origin",
+    branch: "",
+  });
+});
+
+test("deleteRemoteBranchArgs: safely constructs git push delete arguments", () => {
+  assert.deepEqual(deleteRemoteBranchArgs("origin", "main"), [
+    "push",
+    "origin",
+    "--delete",
+    "--end-of-options",
+    "main",
+  ]);
+
+  assert.deepEqual(deleteRemoteBranchArgs("upstream", "feat/nested-branch"), [
+    "push",
+    "upstream",
+    "--delete",
+    "--end-of-options",
+    "feat/nested-branch",
+  ]);
+});
 
 test("resolveDisplayRefs: folds HEAD and pairs local with remote refs", () => {
   const rawRefs = [
@@ -604,7 +667,7 @@ test("resolveDisplayRefs: folds HEAD and pairs local with remote refs", () => {
   // Tag
   assert.equal(displayRefs[2].kind, "tag");
   assert.equal(displayRefs[2].text, "v1.0.0");
-})
+});
 
 test("parseCommitLog: parses unit-separated git log lines into rich commit objects", () => {
   const line1 = [
@@ -654,4 +717,4 @@ test("parseCommitLog: parses unit-separated git log lines into rich commit objec
   // Empty input returns empty array
   assert.deepEqual(parseCommitLog(""), []);
   assert.deepEqual(parseCommitLog(null), []);
-})
+});

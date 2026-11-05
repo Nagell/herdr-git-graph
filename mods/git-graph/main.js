@@ -61,6 +61,8 @@ import {
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
+  splitRemoteBranch,
+  deleteRemoteBranchArgs,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
 } from "./git-logic.js";
@@ -1777,6 +1779,21 @@ export default class GitGraph extends View {
             x: 180,
             y: 70,
           };
+        } else if (preview === "remote-branch-context-menu" && this.commits.length > 0) {
+          const remoteBranch =
+            this.availableBranches.find((b) => this.branchRefKind(b) === "remote") ||
+            "origin/feat/sample";
+          this.contextMenu = {
+            type: "branch",
+            ref: { kind: "remote", text: remoteBranch },
+            x: 180,
+            y: 70,
+          };
+        } else if (preview === "modal-delete-remote-branch" && this.commits.length > 0) {
+          const remoteBranch =
+            this.availableBranches.find((b) => this.branchRefKind(b) === "remote") ||
+            "origin/feat/sample";
+          this.openModal("confirm-delete-remote-branch", { ref: { kind: "remote", text: remoteBranch } }, cx);
         } else if (preview === "modal-merge-branch" && this.commits.length > 0) {
           const branchName =
             this.availableBranches.find((b) => b !== this.currentBranch) ||
@@ -2196,9 +2213,17 @@ export default class GitGraph extends View {
   }
 
   openBranchContextMenu(ref, e, cx, overrideX, overrideY) {
-    const normRef = typeof ref === "string" ? { kind: this.branchRefKind(ref), text: ref } : ref;
+    const normRef = typeof ref === "string" ? { kind: this.branchRefKind(ref), text: ref } : { ...ref };
+    if (normRef.kind === "local" && !normRef.pairedRemote && Array.isArray(this.availableBranches)) {
+      const matchRemote = this.availableBranches.find(
+        (b) => this.branchRefKind(b) === "remote" && (b.endsWith("/" + normRef.text) || (this.remotes?.length && b === `${this.remotes[0]}/${normRef.text}`))
+      );
+      if (matchRemote) {
+        normRef.pairedRemote = { kind: "remote", text: matchRemote };
+      }
+    }
     const menuWidth = 260;
-    const menuHeight = 180;
+    const menuHeight = normRef.pairedRemote ? 210 : 180;
     const origin = this.rootOrigin;
     const b = /** @type {any} */ (this.rootBounds);
     let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
@@ -2344,7 +2369,7 @@ export default class GitGraph extends View {
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
-    } else if (type === "confirm-merge-branch") {
+    } else if (type === "confirm-merge-branch" || type === "confirm-delete-remote-branch") {
       this.modalDialog = { type, ref: target?.ref || target, error: null };
       this.modalInput = null;
     } else if (type.startsWith("confirm-")) {
@@ -2664,6 +2689,9 @@ export default class GitGraph extends View {
           const r = await exec("git", ["branch", force ? "-D" : "-d", "--end-of-options", bName], { cwd: root, on });
           if (r.code === 0) {
             this.closeModal(cx);
+            if (this.branchFilter === bName) {
+              this.branchFilter = "all";
+            }
             notify({ title: "Branch deleted", body: `Deleted branch '${bName}'`, level: "success" });
             this.refresh(cx);
           } else {
@@ -2674,6 +2702,29 @@ export default class GitGraph extends View {
             } else {
               fail(errStr || "Failed to delete branch");
             }
+          }
+        } else if (type === "confirm-delete-remote-branch") {
+          const bName = typeof ref === "string" ? ref : ref?.text || "";
+          if (!bName) {
+            fail("No branch selected");
+            return;
+          }
+          const { remote, branch: rBranch } = splitRemoteBranch(bName, this.remotes);
+          if (!remote || !rBranch) {
+            fail(`Could not determine remote and branch from '${bName}'`);
+            return;
+          }
+          const r = await exec("git", [...NETWORK, ...deleteRemoteBranchArgs(remote, rBranch)], { cwd: root, on });
+          if (r.code === 0) {
+            this.closeModal(cx);
+            if (this.branchFilter === bName) {
+              this.branchFilter = "all";
+            }
+            notify({ title: "Remote branch deleted", body: `Deleted remote branch '${bName}' from ${remote}`, level: "success" });
+            this.refresh(cx);
+          } else {
+            const errStr = (r.stderr || r.stdout).trim();
+            fail(errStr || "Failed to delete remote branch");
           }
         }
       } finally {
@@ -5671,6 +5722,65 @@ export default class GitGraph extends View {
                   .child(div().text_color(color(t.ansi1)).child("Delete Branch…"))
               )
             )
+            // Delete remote branch
+            .when(isRemote, (e) =>
+              e.child(
+                h_flex()
+                  .id("bmenu-delete-remote")
+                  .h(26)
+                  .px(8)
+                  .gap(6)
+                  .items_center()
+                  .rounded(5)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(color(t.hover)))
+                  .on_click((_e, cx) => this.openModal("confirm-delete-remote-branch", { ref }, cx))
+                  .child(
+                    div()
+                      .w(14)
+                      .h(14)
+                      .flex_none()
+                      .flex()
+                      .items_center()
+                      .justify_center()
+                      .child(svg("mods/git-graph/icons/trash.svg").size(12).text_color(color(t.ansi1)))
+                  )
+                  .child(div().text_color(color(t.ansi1)).child("Delete Remote Branch…"))
+              )
+            )
+            // Delete paired remote branch
+            .when(!isRemote && Boolean(ref.pairedRemote), (e) =>
+              e.child(
+                h_flex()
+                  .id("bmenu-delete-paired-remote")
+                  .h(26)
+                  .px(8)
+                  .gap(6)
+                  .items_center()
+                  .rounded(5)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(color(t.hover)))
+                  .on_click((_e, cx) => this.openModal("confirm-delete-remote-branch", { ref: ref.pairedRemote }, cx))
+                  .child(
+                    div()
+                      .w(14)
+                      .h(14)
+                      .flex_none()
+                      .flex()
+                      .items_center()
+                      .justify_center()
+                      .child(svg("mods/git-graph/icons/trash.svg").size(12).text_color(color(t.ansi1)))
+                  )
+                  .child(
+                    div()
+                      .flex_1()
+                      .min_w(0)
+                      .truncate()
+                      .text_color(color(t.ansi1))
+                      .child(`Delete Remote Branch '${ref.pairedRemote.text}'…`)
+                  )
+              )
+            )
             // Copy branch name
             .child(
               h_flex()
@@ -5895,6 +6005,8 @@ export default class GitGraph extends View {
                           ? `Rebase '${this.currentBranch || "HEAD"}' on ${commit.shortHash}`
                           : dialog.type === "confirm-delete-branch"
                           ? `Delete Branch '${dialog.ref?.text}'`
+                          : dialog.type === "confirm-delete-remote-branch"
+                          ? `Delete Remote Branch '${dialog.ref?.text}'`
                           : "Confirm Action"
                       )
                   )
@@ -5968,11 +6080,26 @@ export default class GitGraph extends View {
                       ? `Rebase current branch '${this.currentBranch}' onto ${commit.shortHash}`
                       : dialog.type === "confirm-delete-branch"
                       ? `Permanently delete branch '${dialog.ref?.text}'`
+                      : dialog.type === "confirm-delete-remote-branch"
+                      ? `Permanently delete remote branch '${dialog.ref?.text}' from the remote repository`
                       : ""
                   )
               )
           )
           // Warnings for mutations
+          .when(dialog.type === "confirm-delete-remote-branch", (e) =>
+            e.child(
+              div()
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi1 + "18"))
+                .border_1()
+                .border_color(color(t.ansi1 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi1))
+                .child("⚠️ Deleting a remote branch permanently removes it from the remote repository. This cannot be undone.")
+            )
+          )
           .when(dialog.type === "confirm-checkout", (e) =>
             e.child(
               v_flex()
@@ -6556,7 +6683,7 @@ export default class GitGraph extends View {
                   .bg(color(
                     dialog.type === "reset" && dialog.resetMode === "hard"
                       ? t.ansi1
-                      : dialog.type === "confirm-delete-branch" || dialog.type === "drop-stash"
+                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "drop-stash"
                       ? t.ansi1
                       : t.solid
                   ))
@@ -6588,6 +6715,8 @@ export default class GitGraph extends View {
                         ? "Unstashing…"
                         : dialog.type === "drop-stash"
                         ? "Dropping…"
+                        : dialog.type === "confirm-delete-remote-branch"
+                        ? "Deleting…"
                         : "Working…"
                       : dialog.type === "clean-model"
                       ? dialog.opencodeInstalled === false
@@ -6625,6 +6754,8 @@ export default class GitGraph extends View {
                       ? "Merge"
                       : dialog.type === "confirm-rebase"
                       ? "Rebase"
+                      : dialog.type === "confirm-delete-remote-branch"
+                      ? "Delete Remote Branch"
                       : dialog.type === "confirm-delete-branch"
                       ? "Delete Branch"
                       : "Confirm"
