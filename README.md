@@ -56,14 +56,14 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - The branch dropdown lists existing stashes even when the tree is clean, and restoring one opens a confirmation and runs `git stash pop --index`.
 - **VS Code-Style Changed Files Tree**:
   - A fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder.
-  - Nested folders with indentation guide lines and chevrons; no folder icons, matching VS Code's Source Control view.
-  - Colored language badges per file (`JS`, `TS`, `#` for CSS, `{}` for JSON, `<>` for HTML, …) with the generic file icon as fallback.
+  - Nested folders with indentation guide lines, chevrons, and the Material folder icon.
+  - Full-color Material Icon Theme icons per file, chosen by exact name or extension (`fileIconPath` in `git-logic.js`), with `_light` variants on light themes — the same icon pattern as the File Editor mod.
   - Porcelain status letters on the right: Added (green/`ansi2`), Deleted (red/`ansi1`), Modified (blue/`ansi4`), Conflict (yellow/`ansi3`).
   - Colored per-file `+added` / `−deleted` counts beside the status letter (green/red); untracked files also show `+N` by counting their lines. The hover tooltip keeps the full path and status label.
   - The details pane below the graph is resizable: drag the divider to change how much of the panel belongs to the commit list and how much to the changed-file tree.
   - The commit message wraps and expands with its content up to a readable cap, then scrolls, so the description is never clipped.
 - **Full-Size Diff Tabs**:
-  - Clicking a file in the changed-files tree opens its diff in a dedicated Herdr tab (`Diff · <file>`): a virtualized editor with old/new line gutters, green/red change backgrounds, styled hunk headers, and horizontal scrolling for long lines.
+  - Clicking a file in the changed-files tree opens its diff in a dedicated Herdr tab (`Diff · <file>`): the tab header shows the file's Material icon, and the body is a virtualized editor with old/new line gutters, green/red change backgrounds, styled hunk headers, and horizontal scrolling for long lines.
   - Three layouts, switchable from the tab toolbar and remembered across tabs: **Inline** (unified), **Split** (old and new side by side), and **Stacked** (old above new). Both split panes share one vertical scroll position and keep their own horizontal scrollbar.
   - **Wrap** toggles soft wrapping for long lines in every layout, with the choice remembered across tabs. It reflows to the pane width, keeps line numbers on the first visual row, and preserves syntax colors and intra-line highlights across continuation rows.
   - Character-level intra-line highlighting: changed characters get a brighter red/green background on top of the syntax colors, so a one-character edit inside a long line is visible at a glance (VS Code-style).
@@ -186,6 +186,10 @@ herdr-app do tab.new --name "Diff · file.txt (abc1234)" --mod git-graph \
 ```
 
 Diffs open in the last layout used (Inline, Split, or Stacked) and remember it across tabs, and the **Wrap** toggle is remembered the same way. Pass `"diffView": "inline" | "split" | "stacked"` or `"diffWrap": true` to choose them when opening a tab directly. Pass `"on": "<machine>"` as well to read the diff from a remote space's machine.
+
+## Credits
+
+File and folder icons are from [Material Icon Theme](https://github.com/PKief/vscode-material-icon-theme), MIT License. See `mods/git-graph/icons/LICENSE.txt`.
 
 ## Install & Sync
 

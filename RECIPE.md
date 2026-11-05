@@ -21,7 +21,7 @@ Inside any Herdr split pane, dedicated tab, or sidebar panel, you see a full vis
 - **In-Progress Banner**: Displays an alert banner during ongoing merges, rebases, cherry-picks, or reverts with one-click Continue and Abort buttons.
 - **Details & Diff Tabs**:
   - **Header**: Selected commit subject, full commit hash with one-click Copy SHA button, author email, relative date, and close button.
-  - **Changes Tree**: VS Code-style fixed **Changes** header with a count badge and collapse-all chevron, indentation guide lines, folder chevrons, colored language badges, right-aligned status letters (`M`, `A`, `D`, `U`), and colored per-file `+added` / `−deleted` counts (green/red). Untracked files get `+N` from their line count.
+  - **Changes Tree**: VS Code-style fixed **Changes** header with a count badge and collapse-all chevron, indentation guide lines, folder chevrons and the Material folder icon, full-color Material Icon Theme file icons (name/extension based, with light-theme variants), right-aligned status letters (`M`, `A`, `D`, `U`), and colored per-file `+added` / `−deleted` counts (green/red). Untracked files get `+N` from their line count. This is the same icon pattern as `herdr-file-editor`.
   - **Diff Tab**: Clicking a file opens its diff full size in a `Diff · <file>` tab with old/new line gutters, colored additions and deletions, hunk headers, horizontal scrolling, and character-level intra-line highlights. Toolbar buttons switch between **Inline**, **Split** (side by side), and **Stacked** (old above new); the choice is remembered, and both split panes scroll together vertically. **Wrap** soft-wraps long lines in every layout and is remembered too. Working-tree diffs refresh automatically.
   - **Compact Mode**: The details panel shows the file tree full width when the container is below 560px, and `panel: true` renders the graph as a Files-style card with the compact toolbar.
 - **Commit Context Menu & Modals**:
@@ -55,7 +55,7 @@ Inside any Herdr split pane, dedicated tab, or sidebar panel, you see a full vis
   - `main.js`: Main view component, file tree view, diff editor, branch selector, context menu, and dialogs.
   - `git-logic.js`: Pure functions for topological DAG lane allocation, ref parsing, file tree construction, and diff processing.
   - `mod.json`: Herdr mod manifest (`"place": "none"`, `"focusable": true`).
-  - `icons/`: Clean vector SVG icons (`branch.svg`, `tag.svg`, `commit.svg`, `merge.svg`, `refresh.svg`, `copy.svg`, `folder.svg`, `fetch.svg`, `pull.svg`, `push.svg`, `search.svg`, `expand.svg`, `chevron-down.svg`, `chevron-right.svg`).
+  - `icons/`: Clean vector SVG icons for the toolbar and graph (`branch.svg`, `tag.svg`, `commit.svg`, `merge.svg`, `refresh.svg`, `copy.svg`, `folder.svg`, `fetch.svg`, `pull.svg`, `push.svg`, `search.svg`, `expand.svg`, `chevron-down.svg`, `chevron-right.svg`) plus the bundled Material Icon Theme file/folder set (`folder-base.svg`, `typescript.svg`, `document.svg`, …; MIT, see `icons/LICENSE.txt`).
 - `gpui-kit` & `gpui-base` — native GPU elements, flex layouts, virtual lists, focus handles, and text inputs.
 - `herdr` module — `exec` (git commands), `hc` (background terminals), `terminals`, `readTextFile`, `watchFolder`, `theme()`, `settings()`, `shared()`, `notify()`, and `nextCommand()`.
 - `preview.png` — real window capture showing `git-graph` running in Herdr.

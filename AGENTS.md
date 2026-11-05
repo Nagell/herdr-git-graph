@@ -85,8 +85,9 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - `props: { panel: true }` renders the graph as the Files-style card inside a layout panel, such as Herdr's Changes slot.
   - The toolbar stays compact: the brand text is dropped, the branch selector flexes into the free width, and an expand button opens the same repository full size in a tab.
 - **Commit Details Tree View & Diff Tabs**:
-  - Changed files use a VS Code Source Control-style tree: a fixed **Changes** header with a count badge and collapse-all chevron, nested folder rows with indent guide lines, and no folder icons.
-  - File rows show a colored language badge (`JS`, `TS`, `#` for CSS, `{}` for JSON, …) or the generic file icon, with the porcelain status letter (`M`/`A`/`D`/`U`) on the right.
+  - Changed files use a VS Code Source Control-style tree: a fixed **Changes** header with a count badge and collapse-all chevron, nested folder rows with indent guide lines, and the Material folder icon.
+  - File rows show the full-color Material Icon Theme icon chosen by exact name or extension (`fileIconPath` in `git-logic.js`), using `_light` variants on light themes, with the porcelain status letter (`M`/`A`/`D`/`U`) on the right. This matches the `herdr-file-editor` icon pattern; icons live in `mods/git-graph/icons/` under the Material Icon Theme MIT license (`icons/LICENSE.txt`).
+  - The diff tab header also shows the file's Material icon instead of the generic tinted glyph.
   - Folders with changes are expanded by default; the header collapses or expands all of them. File rows show colored `+added` / `−deleted` counts (green/red) beside the status; untracked files get their line count from `wc -l` so they show `+N` too.
   - The bottom details pane is a native `v_resizable` split: drag its top divider to trade height between the commit list and the file tree, and the size is kept across repaints.
   - The commit message wraps and grows to its content, up to 200px (150px in compact mode), then scrolls instead of clipping the description.
