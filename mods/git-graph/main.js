@@ -110,6 +110,7 @@ const CLEAN_AGENT_LABEL = "AI commit worker";
 const CLEAN_AGENT_TOAST_TIMEOUT = 12 * 60 * 60 * 1000;
 const CLEAN_AGENT_SPINNER_ON_DARK = "mods/git-graph/icons/spinner-on-dark.gif";
 const CLEAN_AGENT_SPINNER_ON_LIGHT = "mods/git-graph/icons/spinner-on-light.gif";
+const CLEAN_AGENT_SPINNER_SVG = "mods/git-graph/icons/spinner.svg";
 // When no curated preference matches, free models from these families are
 // listed first: they are the strongest at code edits and commit slicing.
 const CLEAN_AGENT_FAMILY_RANK = [
@@ -4205,7 +4206,7 @@ export default class GitGraph extends View {
                     }
                     this.startTreeAgent(cx);
                   })
-                  .child(svg("mods/git-graph/icons/sparkles.svg").size(12).text_color(color(t.accent)))
+                  .child(this.treeAgentGlyph(12, this.treeAgentBusy(), t.accent))
                   .child(div().flex_1().truncate().child(`Clean tree with ${CLEAN_AGENT_LABEL}`))
                   .child(
                     div()
@@ -5295,6 +5296,21 @@ export default class GitGraph extends View {
     });
   }
 
+  /**
+   * The AI worker's glyph: a native spinning arc while it is starting or
+   * cleaning the tree, and the static sparkles icon whenever it is idle.
+   * `.spin()` animates in GPUI itself, so no redraw timer is involved.
+   *
+   * @param {number} size
+   * @param {boolean} active
+   * @param {string} tint
+   */
+  treeAgentGlyph(size, active, tint) {
+    return active
+      ? svg(CLEAN_AGENT_SPINNER_SVG).size(size).flex_none().text_color(color(tint)).spin(900)
+      : svg("mods/git-graph/icons/sparkles.svg").size(size).flex_none().text_color(color(tint));
+  }
+
   /** One AI commit-worker button for the toolbar, beside the branch controls. */
   treeAgentButton(t, cx, isCompact) {
     const status = this.treeAgentStatus();
@@ -5304,6 +5320,7 @@ export default class GitGraph extends View {
     const disabled = this.treeAgentStarting || (!busy && hardDisabled);
     const showLabel = !isCompact && this.width >= 900;
     const model = cleanModelLabel(this.cleanAgentModelLabel());
+    const active = this.treeAgentStarting || busy;
 
     let tip;
     if (this.treeAgentStarting) {
@@ -5359,7 +5376,7 @@ export default class GitGraph extends View {
         }
         this.startTreeAgent(cx);
       })
-      .child(svg("mods/git-graph/icons/sparkles.svg").size(12).text_color(color(disabled ? t.dim : t.accent)))
+      .child(this.treeAgentGlyph(12, active, active ? t.accent : disabled ? t.dim : t.accent))
       .when(showLabel, (e) =>
         e.child(
           div()
