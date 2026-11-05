@@ -64,6 +64,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
 - **Full-Size Diff Tabs**:
   - Clicking a file in the changed-files tree opens its diff in a dedicated Herdr tab (`Diff · <file>`): a virtualized editor with old/new line gutters, green/red change backgrounds, styled hunk headers, and horizontal scrolling for long lines.
   - Three layouts, switchable from the tab toolbar and remembered across tabs: **Inline** (unified), **Split** (old and new side by side), and **Stacked** (old above new). Both split panes share one vertical scroll position and keep their own horizontal scrollbar.
+  - **Wrap** toggles soft wrapping for long lines in every layout, with the choice remembered across tabs. It reflows to the pane width, keeps line numbers on the first visual row, and preserves syntax colors and intra-line highlights across continuation rows.
   - Character-level intra-line highlighting: changed characters get a brighter red/green background on top of the syntax colors, so a one-character edit inside a long line is visible at a glance (VS Code-style).
   - Working-tree diffs are synthesized for untracked files and refresh automatically while the repo changes.
   - Clicking the same file again selects the existing diff tab instead of piling up duplicates; commit diffs are named `Diff · <file> (<short sha>)`.
@@ -160,8 +161,8 @@ Changes view:
 The button keeps working — it now toggles the graph instead of the old changes
 list, with the working tree row, file tree, and diff tabs already built in.
 The panel resolves its repository from the selected space, checks that location
-every 100 ms in memory, and reloads as soon as it changes — so switching spaces
-updates the Changes panel immediately. A pinned space still keeps its pinned
+and panel visibility every 100 ms in memory, and reloads as soon as it opens or changes — so switching spaces
+or opening the Changes tab updates the Changes panel immediately with fresh status. A pinned space still keeps its pinned
 folder regardless of where its terminals `cd`.
 
 ### Test Preview Props
@@ -183,7 +184,7 @@ herdr-app do tab.new --name "Diff · file.txt (abc1234)" --mod git-graph \
   --props '{"folder":"/path/to/repo","diffFile":"src/file.txt","diffKind":"commit","diffHash":"abc1234"}'
 ```
 
-Diffs open in the last layout used (Inline, Split, or Stacked) and remember it across tabs. Pass `"diffView": "inline" | "split" | "stacked"` to choose one when opening a tab directly. Pass `"on": "<machine>"` as well to read the diff from a remote space's machine.
+Diffs open in the last layout used (Inline, Split, or Stacked) and remember it across tabs, and the **Wrap** toggle is remembered the same way. Pass `"diffView": "inline" | "split" | "stacked"` or `"diffWrap": true` to choose them when opening a tab directly. Pass `"on": "<machine>"` as well to read the diff from a remote space's machine.
 
 ## Install & Sync
 
