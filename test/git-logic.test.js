@@ -17,6 +17,8 @@ import {
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
+  OPENCODE_INSTALL_CMD,
+  OPENCODE_DOCS_URL,
 } from "../mods/git-graph/git-logic.js";
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
@@ -549,4 +551,9 @@ test("filterVisibleCleanModels: includes active paid model at index 0 even when 
   });
   assert.equal(searched.length, 1);
   assert.equal(searched[0].id, "opencode/deepseek-v4.1-flash-free");
+});
+
+test("OPENCODE_INSTALL_CMD and OPENCODE_DOCS_URL constants are properly defined", () => {
+  assert.equal(OPENCODE_INSTALL_CMD, "curl -fsSL https://opencode.ai/install | bash");
+  assert.equal(OPENCODE_DOCS_URL, "https://opencode.ai/docs/");
 });

@@ -1591,3 +1591,10 @@ export function filterVisibleCleanModels(models, { provider = null, query = "", 
 
   return list;
 }
+
+/** Official OpenCode CLI install command from https://opencode.ai/docs/ */
+export const OPENCODE_INSTALL_CMD = "curl -fsSL https://opencode.ai/install | bash";
+
+/** Official OpenCode documentation URL */
+export const OPENCODE_DOCS_URL = "https://opencode.ai/docs/";
+
