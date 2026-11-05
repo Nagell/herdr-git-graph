@@ -217,6 +217,91 @@ export function parseRefs(refStr) {
 }
 
 /**
+ * Resolves raw parsed refs into display refs:
+ * 1. Folds HEAD into the checked-out branch pill (marked with isHead: true).
+ * 2. Pairs local branches with matching remotes (e.g. main | origin).
+ *
+ * @param {Array<{ kind: "head" | "local" | "remote" | "tag", text: string }>} refs
+ * @returns {Array<any>}
+ */
+export function resolveDisplayRefs(refs) {
+  if (!refs || refs.length === 0) return [];
+  const folded = [];
+  for (let i = 0; i < refs.length; i++) {
+    const ref = refs[i];
+    if (ref.kind !== "head") {
+      folded.push(ref);
+      continue;
+    }
+    const next = refs[i + 1];
+    if (next && next.kind === "local") {
+      folded.push({ ...next, isHead: true });
+      i++;
+    } else {
+      folded.push(ref);
+    }
+  }
+
+  const pairedRemoteTexts = new Set();
+  const pairByLocal = new Map();
+  for (const ref of folded) {
+    if (ref.kind !== "local") continue;
+    const remote = folded.find(
+      (r) => r.kind === "remote" && !pairedRemoteTexts.has(r.text) && r.text.endsWith("/" + ref.text)
+    );
+    if (remote) {
+      pairedRemoteTexts.add(remote.text);
+      pairByLocal.set(ref.text, remote);
+    }
+  }
+
+  const displayRefs = [];
+  for (const ref of folded) {
+    if (ref.kind === "remote" && pairedRemoteTexts.has(ref.text)) continue;
+    displayRefs.push(
+      ref.kind === "local" && pairByLocal.has(ref.text)
+        ? { ...ref, pairedRemote: pairByLocal.get(ref.text) }
+        : ref
+    );
+  }
+  return displayRefs;
+}
+
+/**
+ * Parses raw git log output formatted with Unit Separator (%x1f).
+ *
+ * @param {string} stdout
+ * @returns {Array<any>}
+ */
+export function parseCommitLog(stdout) {
+  if (!stdout || !stdout.trim()) return [];
+  const rawLines = stdout.trim().split("\n").filter(Boolean);
+  const commits = [];
+  for (const line of rawLines) {
+    const parts = line.split("\x1f");
+    if (parts.length < 7) continue;
+    const [hash, parentStr, author, email, timestamp, refStr, ...subjectParts] = parts;
+    const subject = subjectParts.join("\x1f");
+    const parents = parentStr ? parentStr.trim().split(" ").filter(Boolean) : [];
+    const refs = parseRefs(refStr);
+    const displayRefs = resolveDisplayRefs(refs);
+    commits.push({
+      hash,
+      shortHash: hash.slice(0, 7),
+      parents,
+      author,
+      email,
+      timestamp: parseInt(timestamp, 10) || 0,
+      subject,
+      refs,
+      displayRefs,
+      isHead: refs.some((r) => r.kind === "head"),
+    });
+  }
+  return commits;
+}
+
+/**
  * Computes topological DAG lanes for commits with stable line colors.
  * Keeps each branch line's color index consistent throughout its lifetime.
  * Outgoing connections to parents outside the loaded set terminate cleanly at row edge.

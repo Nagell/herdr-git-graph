@@ -45,7 +45,11 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - **Never register event handlers inside the row renderer** (`on_click`, `on_size_change`, `on_hover`, …): the runtime throws and the whole visible slice disappears, leaving a blank list. Use `on_item_click` / `on_item_secondary_click` on the list and compute per-badge hit boxes from the fixed widths the rows are laid out with.
   - Every row carries a 1px bottom rule and a vertical rule closes the graph column; the header mirrors those columns (`Graph / Description / Date / Author / Commit`).
   - HEAD folds into the checked-out branch pill (a check icon plus the branch name) instead of a separate badge. A local branch and its matching remote share one neon pill (`⎇ main | origin`); a remote without its local branch keeps its full `origin/main` label. Tags keep the tag icon.
-  - Implements pagination with a "Load 500 more commits..." button and commit count status in the toolbar.
+  - Implements pagination with a "Load 100 more commits..." button and commit count status in the toolbar.
+  - Caches inspected commit details (`commitDetailsCache`, up to 200 commits) for zero-latency instant commit selection without refetching or UI blanking.
+  - Fast branch switching path: switching branch filters or loading more commits executes only `git log` and lane recalculation without re-scanning unchanged working tree status, remotes, or stashes.
+  - Concurrent repository discovery: `refresh()` fires all independent git status, branch, remote, and log checks simultaneously with `Promise.all`.
+  - Ref display memoization: `resolveDisplayRefs` precomputes folded HEAD and paired remote badges once per commit, eliminating per-frame allocations during table scrolling.
   - The **All branches** log excludes `refs/stash`, so Git's internal stash WIP/index/untracked commits never appear as graph rows. Each stash instead renders as one dedicated row.
 - **Stash Rows**:
   - `git stash list` refreshes with the graph. Each stash sits above the working tree as a standalone row: a hollow stash node, a `stash@{n}` pill, the reflog subject, relative date, author, and stash commit.

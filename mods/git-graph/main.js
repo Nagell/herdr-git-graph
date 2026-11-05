@@ -41,6 +41,8 @@ import {
   getLaneColor,
   getStatusColor,
   parseRefs,
+  parseCommitLog,
+  resolveDisplayRefs,
   computeLanes,
   buildFileTree,
   flattenFileTree,
@@ -377,7 +379,8 @@ export default class GitGraph extends View {
     this.currentBranch = "";
     this.availableBranches = [];
     this.hasHead = true;
-    this.commitLimit = 500;
+    this.commitLimit = 100;
+    this.commitDetailsCache = new Map();
 
     this.selectedCommit = null;
     this.commitDetails = null;
@@ -1407,6 +1410,88 @@ export default class GitGraph extends View {
     return items;
   }
 
+  maintainSelection(cx) {
+    if (this.selectedCommit) {
+      if (this.selectedCommit.isWorkingTree) {
+        if (this.workingTreeFiles.length > 0) {
+          this.selectedCommit.subject = `Working Tree · ${this.workingTreeFiles.length} uncommitted file${this.workingTreeFiles.length === 1 ? "" : "s"}`;
+          this.commitFiles = this.workingTreeFiles;
+          if (this.selectedFile) {
+            const stillExists = this.workingTreeFiles.some((f) => f.path === this.selectedFile);
+            if (!stillExists) {
+              this.selectedFile = null;
+            }
+          }
+        } else {
+          this.clearSelection(cx);
+        }
+      } else {
+        const stillThere =
+          this.commits.find((c) => c.hash === this.selectedCommit.hash) ||
+          this.stashNodes.find((c) => c.hash === this.selectedCommit.hash);
+        if (stillThere) {
+          this.selectedCommit = stillThere;
+        } else if (this.workingTreeFiles.length > 0) {
+          this.selectWorkingTree(cx);
+        } else if (this.commits.length > 0) {
+          this.selectCommit(this.commits[0], cx);
+        } else {
+          this.clearSelection(cx);
+        }
+      }
+    } else if (this.workingTreeFiles.length > 0) {
+      this.selectWorkingTree(cx);
+    } else if (this.commits.length > 0) {
+      this.selectCommit(this.commits[0], cx);
+    }
+  }
+
+  loadBranchCommits(cx) {
+    if (this.loading) {
+      this.pendingRefresh = true;
+      return;
+    }
+    const root = this.root;
+    const on = this.on;
+    const context = this.getKey();
+    if (!root) return;
+
+    this.loading = true;
+    cx.spawn(async (cx) => {
+      try {
+        const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+        const args = logArgs(this.branchFilter, this.commitLimit);
+        const logRes = await git(args);
+        if (this.getKey() !== context) return;
+
+        let commits = [];
+        let logError = null;
+        if (logRes.code === 0) {
+          commits = parseCommitLog(logRes.stdout);
+        } else {
+          logError = logRes.stderr?.trim() || `git log failed with code ${logRes.code}`;
+        }
+
+        this.commits = commits;
+        this.error = logError;
+        this.applyFilter();
+        this.maintainSelection(cx);
+      } catch (err) {
+        if (this.getKey() === context || this.context === context) {
+          this.error = err instanceof Error ? err.message : String(err);
+        }
+      } finally {
+        this.loading = false;
+        if (this.pendingRefresh) {
+          this.pendingRefresh = false;
+          this.refresh(cx);
+        } else {
+          cx.notify();
+        }
+      }
+    });
+  }
+
   refresh(cx) {
     if (this.loading) {
       this.pendingRefresh = true;
@@ -1468,32 +1553,79 @@ export default class GitGraph extends View {
           this.stashes = [];
           this.stashNodes = [];
           this.stagedCount = 0;
+          this.commitDetailsCache.clear();
           cx.notify();
         }
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
 
-        // Check in-progress operations
-        const op = await detectInProgress(root, on);
+        // Phase 1: Fire all independent repo inspections and git log concurrently
+        const [
+          op,
+          branchRes,
+          headRes,
+          branchesRes,
+          remotesRes,
+          stashRes,
+          statusRes,
+          logRes,
+        ] = await Promise.all([
+          detectInProgress(root, on),
+          git(["branch", "--show-current"]),
+          git(["rev-parse", "--verify", "HEAD"]),
+          git(["branch", "--list", "--all", "--format=%(refname:short)"]),
+          git(["remote"]),
+          git(["stash", "list", "--format=%gd%x1f%H%x1f%P%x1f%gs%x1f%at%x1f%an%x1f%ae"]),
+          git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]),
+          git(logArgs(this.branchFilter, this.commitLimit)),
+        ]);
+        if (this.getKey() !== context) return;
 
-        // Branch & HEAD check
-        const branchRes = await git(["branch", "--show-current"]);
         const branchName = branchRes.code === 0 ? branchRes.stdout.trim() : "";
         let currentBranch = branchName;
-        const headRes = await git(["rev-parse", "--verify", "HEAD"]);
         const hasHead = headRes.code === 0;
         const detached = hasHead && !branchName;
 
-        if (!currentBranch) {
-          if (hasHead) {
-            const shortHead = await git(["rev-parse", "--short", "HEAD"]);
-            currentBranch = shortHead.code === 0 ? shortHead.stdout.trim() : "HEAD";
-          } else {
-            currentBranch = "main (unborn)";
+        // Phase 2: Upstream, diff, and short HEAD (if detached) concurrently
+        let upstream = null;
+        let ahead = 0;
+        let behind = 0;
+        let diffResults = [];
+
+        if (hasHead) {
+          const secondary = [
+            git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]),
+            git(["diff", "HEAD", "--numstat", "-z", "--no-renames"]),
+          ];
+          if (!currentBranch) {
+            secondary.push(git(["rev-parse", "--short", "HEAD"]));
           }
+          const [upstreamRes, headDiffRes, shortHeadRes] = await Promise.all(secondary);
+          if (this.getKey() !== context) return;
+
+          if (!currentBranch) {
+            currentBranch = shortHeadRes?.code === 0 ? shortHeadRes.stdout.trim() : "HEAD";
+          }
+          diffResults = [headDiffRes];
+
+          if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) {
+            upstream = upstreamRes.stdout.trim();
+            const countsRes = await git(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
+            if (countsRes.code === 0 && countsRes.stdout.trim()) {
+              const [a, b] = countsRes.stdout.trim().split(/\s+/);
+              ahead = Number(a) || 0;
+              behind = Number(b) || 0;
+            }
+          }
+        } else {
+          currentBranch = "main (unborn)";
+          diffResults = await Promise.all([
+            git(["diff", "--cached", "--numstat", "-z", "--no-renames"]),
+            git(["diff", "--numstat", "-z", "--no-renames"]),
+          ]);
+          if (this.getKey() !== context) return;
         }
 
         // Available local and remote branches
-        const branchesRes = await git(["branch", "--list", "--all", "--format=%(refname:short)"]);
         const availableBranches = [];
         if (branchesRes.code === 0 && branchesRes.stdout) {
           for (const b of branchesRes.stdout.split("\n")) {
@@ -1504,9 +1636,7 @@ export default class GitGraph extends View {
           }
         }
 
-        // Upstream tracking state (ahead / behind) and configured remotes.
-        // These drive the fetch, pull and push buttons in the toolbar.
-        const remotesRes = await git(["remote"]);
+        // Configured remotes
         const remotes =
           remotesRes.code === 0
             ? remotesRes.stdout
@@ -1514,34 +1644,8 @@ export default class GitGraph extends View {
                 .map((r) => r.trim())
                 .filter(Boolean)
             : [];
-        let upstream = null;
-        let ahead = 0;
-        let behind = 0;
-        if (hasHead) {
-          const upstreamRes = await git([
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-          ]);
-          if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) {
-            upstream = upstreamRes.stdout.trim();
-            const countsRes = await git(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
-            if (countsRes.code === 0 && countsRes.stdout.trim()) {
-              const [a, b] = countsRes.stdout.trim().split(/\s+/);
-              ahead = Number(a) || 0;
-              behind = Number(b) || 0;
-            }
-          }
-        }
 
-        // Stash entries become their own rows. `%gs` is the reflog subject
-        // (the custom message, or "WIP on <branch>: …").
-        const stashRes = await git([
-          "stash",
-          "list",
-          "--format=%gd%x1f%H%x1f%P%x1f%gs%x1f%at%x1f%an%x1f%ae",
-        ]);
+        // Stash entries
         const stashes = [];
         if (stashRes.code === 0 && stashRes.stdout) {
           for (const line of stashRes.stdout.split("\n")) {
@@ -1564,16 +1668,8 @@ export default class GitGraph extends View {
         // Working tree status & numstat
         const wtFiles = [];
         let stagedCount = 0;
-        const statusRes = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (statusRes.code === 0 && statusRes.stdout) {
           const stats = {};
-          const diffResults = hasHead
-            ? [await git(["diff", "HEAD", "--numstat", "-z", "--no-renames"])]
-            : [
-                await git(["diff", "--cached", "--numstat", "-z", "--no-renames"]),
-                await git(["diff", "--numstat", "-z", "--no-renames"]),
-              ];
-
           for (const res of diffResults) {
             if (res.code === 0 && res.stdout) {
               const entries = res.stdout.split("\0");
@@ -1605,8 +1701,7 @@ export default class GitGraph extends View {
             wtFiles.push({ path: filePath, status: s, fresh, ...stat });
           }
 
-          // Untracked files have no numstat entry. Count their lines so the
-          // tree can show the same +N next to the file name.
+          // Untracked files line count
           const freshPaths = wtFiles.filter((f) => f.fresh).map((f) => f.path);
           if (freshPaths.length) {
             const wcRes = await exec("wc", ["-l", "--", ...freshPaths], { cwd: root, on });
@@ -1634,34 +1729,13 @@ export default class GitGraph extends View {
           this.inProgressOp = null;
         }
 
-        // Commit Log Parsing using --decorate=full and Unit Separator %x1f
-        const commits = [];
+        // Commit Log Parsing
+        let commits = [];
         let logError = null;
         if (hasHead) {
-          const args = logArgs(this.branchFilter, this.commitLimit);
-          const logRes = await git(args);
-          if (logRes.code === 0 && logRes.stdout.trim()) {
-            const rawLines = logRes.stdout.trim().split("\n").filter(Boolean);
-            for (const line of rawLines) {
-              const parts = line.split("\x1f");
-              if (parts.length < 7) continue;
-              const [hash, parentStr, author, email, timestamp, refStr, ...subjectParts] = parts;
-              const subject = subjectParts.join("\x1f");
-              const parents = parentStr ? parentStr.trim().split(" ").filter(Boolean) : [];
-              const refs = parseRefs(refStr);
-              commits.push({
-                hash,
-                shortHash: hash.slice(0, 7),
-                parents,
-                author,
-                email,
-                timestamp: parseInt(timestamp, 10) || 0,
-                subject,
-                refs,
-                isHead: refs.some((r) => r.kind === "head"),
-              });
-            }
-          } else if (logRes.code !== 0) {
+          if (logRes.code === 0) {
+            commits = parseCommitLog(logRes.stdout);
+          } else {
             logError = logRes.stderr?.trim() || `git log failed with code ${logRes.code}`;
           }
         }
@@ -1683,42 +1757,7 @@ export default class GitGraph extends View {
         this.commits = commits;
         this.error = logError;
         this.applyFilter();
-
-        // Maintain selection across refreshes
-        if (this.selectedCommit) {
-          if (this.selectedCommit.isWorkingTree) {
-            if (this.workingTreeFiles.length > 0) {
-              // Update working tree files in place without clearing selection
-              this.selectedCommit.subject = `Working Tree · ${this.workingTreeFiles.length} uncommitted file${this.workingTreeFiles.length === 1 ? "" : "s"}`;
-              this.commitFiles = this.workingTreeFiles;
-              if (this.selectedFile) {
-                const stillExists = this.workingTreeFiles.some((f) => f.path === this.selectedFile);
-                if (!stillExists) {
-                  this.selectedFile = null;
-                }
-              }
-            } else {
-              this.clearSelection(cx);
-            }
-          } else {
-            const stillThere =
-              this.commits.find((c) => c.hash === this.selectedCommit.hash) ||
-              this.stashNodes.find((c) => c.hash === this.selectedCommit.hash);
-            if (stillThere) {
-              this.selectedCommit = stillThere;
-            } else if (this.workingTreeFiles.length > 0) {
-              this.selectWorkingTree(cx);
-            } else if (this.commits.length > 0) {
-              this.selectCommit(this.commits[0], cx);
-            } else {
-              this.clearSelection(cx);
-            }
-          }
-        } else if (this.workingTreeFiles.length > 0) {
-          this.selectWorkingTree(cx);
-        } else if (this.commits.length > 0) {
-          this.selectCommit(this.commits[0], cx);
-        }
+        this.maintainSelection(cx);
 
         const p = props();
         const preview = p?.preview;
@@ -1971,9 +2010,18 @@ export default class GitGraph extends View {
   }
 
   setBranchFilter(branch, cx) {
+    if (this.branchFilter === branch) {
+      this.branchDropdownOpen = false;
+      if (cx) cx.notify();
+      return;
+    }
     this.branchFilter = branch;
     this.branchDropdownOpen = false;
-    this.refresh(cx);
+    if (this.root && !this.loading) {
+      this.loadBranchCommits(cx);
+    } else {
+      this.refresh(cx);
+    }
   }
 
   setSearch(query, cx) {
@@ -2026,15 +2074,24 @@ export default class GitGraph extends View {
       return;
     }
     this.selectedCommit = commit;
-    this.commitDetails = null;
-    this.commitFiles = [];
     this.selectedFile = null;
     this.collapsedFolders.clear();
-    cx.notify();
+
+    const hash = commit.hash;
+    const cached = this.commitDetailsCache.get(hash);
+    if (cached) {
+      this.commitDetails = { fullMessage: cached.fullMessage };
+      this.commitFiles = cached.files;
+      if (cx) cx.notify();
+      return;
+    }
+
+    this.commitDetails = null;
+    this.commitFiles = [];
+    if (cx) cx.notify();
 
     const root = this.root,
-      on = this.on,
-      hash = commit.hash;
+      on = this.on;
     cx.spawn(async (cx) => {
       try {
         const [showRes, numRes, nameStatusRes] = await Promise.all([
@@ -2082,6 +2139,12 @@ export default class GitGraph extends View {
             });
           }
         }
+
+        if (this.commitDetailsCache.size >= 200) {
+          const firstKey = this.commitDetailsCache.keys().next().value;
+          this.commitDetailsCache.delete(firstKey);
+        }
+        this.commitDetailsCache.set(hash, { fullMessage, files });
 
         if (this.selectedCommit?.hash === hash) {
           this.commitDetails = { fullMessage };
@@ -2790,8 +2853,12 @@ export default class GitGraph extends View {
   }
 
   loadMoreCommits(cx) {
-    this.commitLimit += 500;
-    this.refresh(cx);
+    this.commitLimit += 100;
+    if (this.root && !this.loading) {
+      this.loadBranchCommits(cx);
+    } else {
+      this.refresh(cx);
+    }
   }
 
   // --- Rendering Helpers ---
@@ -3131,49 +3198,7 @@ export default class GitGraph extends View {
 
   renderCommitRow(commit, t, isCompact, cx) {
     const isSelected = this.selectedCommit?.hash === commit.hash && !this.selectedCommit.isWorkingTree;
-
-    // HEAD is folded into the checked-out branch pill (like Git Graph's ✓ main)
-    // instead of being painted as a separate badge.
-    const refs = [];
-    for (let i = 0; i < commit.refs.length; i++) {
-      const ref = commit.refs[i];
-      if (ref.kind !== "head") {
-        refs.push(ref);
-        continue;
-      }
-      const next = commit.refs[i + 1];
-      if (next && next.kind === "local") {
-        refs.push({ ...next, isHead: true });
-        i++;
-      } else {
-        refs.push(ref);
-      }
-    }
-
-    // A local branch and its matching remote at the same commit share one pill:
-    // `main | origin`, like VS Code's ref label. Remote-only refs keep the full
-    // `origin/main` label.
-    const pairedRemoteTexts = new Set();
-    const pairByLocal = new Map();
-    for (const ref of refs) {
-      if (ref.kind !== "local") continue;
-      const remote = refs.find(
-        (r) => r.kind === "remote" && !pairedRemoteTexts.has(r.text) && r.text.endsWith("/" + ref.text)
-      );
-      if (remote) {
-        pairedRemoteTexts.add(remote.text);
-        pairByLocal.set(ref.text, remote);
-      }
-    }
-    const displayRefs = [];
-    for (const ref of refs) {
-      if (ref.kind === "remote" && pairedRemoteTexts.has(ref.text)) continue;
-      displayRefs.push(
-        ref.kind === "local" && pairByLocal.has(ref.text)
-          ? { ...ref, pairedRemote: pairByLocal.get(ref.text) }
-          : ref
-      );
-    }
+    const displayRefs = commit.displayRefs || resolveDisplayRefs(commit.refs || []);
 
     // Q5 & Q1: Cap badges to max 2 + "+N" chip if > 3 (or > 2 in compact)
     const maxVisibleRefs = isCompact ? 2 : 3;
@@ -3838,7 +3863,7 @@ export default class GitGraph extends View {
               div()
                 .text_size(11)
                 .text_color(color(t.accent))
-                .child(`Showing ${this.commits.length} commits · Load 500 more…`)
+                .child(`Showing ${this.commits.length} commits · Load 100 more…`)
             )
         )
       );

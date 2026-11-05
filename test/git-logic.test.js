@@ -4,6 +4,8 @@ import {
   computeEffectiveRoot,
   isLayoutNodeVisible,
   parseRefs,
+  resolveDisplayRefs,
+  parseCommitLog,
   logArgs,
   tagArgs,
   computeLanes,
@@ -160,6 +162,11 @@ test("logArgs: builds safe arguments for git log", () => {
     "--exclude=refs/stash must come before --all"
   );
   assert.equal(allArgs[allArgs.length - 1], "--", "must end with --");
+  assert.equal(allArgs[allArgs.indexOf("-n") + 1], "500", "defaults to 500 commits");
+
+  // Custom commitLimit
+  const customLimitArgs = logArgs("all", 250);
+  assert.equal(customLimitArgs[customLimitArgs.indexOf("-n") + 1], "250");
 
   // A branch filter starting with '-' is placed after --end-of-options
   const dashArgs = logArgs("-dash-branch");
@@ -571,3 +578,80 @@ test("OPENCODE_INSTALL_CMD and OPENCODE_DOCS_URL constants are properly defined"
   assert.equal(OPENCODE_INSTALL_CMD, "curl -fsSL https://opencode.ai/install | bash");
   assert.equal(OPENCODE_DOCS_URL, "https://opencode.ai/docs/");
 });
+
+
+test("resolveDisplayRefs: folds HEAD and pairs local with remote refs", () => {
+  const rawRefs = [
+    { kind: "head", text: "HEAD" },
+    { kind: "local", text: "main" },
+    { kind: "remote", text: "origin/main" },
+    { kind: "remote", text: "origin/feature-z" },
+    { kind: "tag", text: "v1.0.0" },
+  ];
+  const displayRefs = resolveDisplayRefs(rawRefs);
+
+  // HEAD is folded into main with isHead: true, and origin/main paired into main
+  assert.equal(displayRefs.length, 3);
+  assert.equal(displayRefs[0].kind, "local");
+  assert.equal(displayRefs[0].text, "main");
+  assert.equal(displayRefs[0].isHead, true);
+  assert.deepEqual(displayRefs[0].pairedRemote, { kind: "remote", text: "origin/main" });
+
+  // Unpaired remote
+  assert.equal(displayRefs[1].kind, "remote");
+  assert.equal(displayRefs[1].text, "origin/feature-z");
+
+  // Tag
+  assert.equal(displayRefs[2].kind, "tag");
+  assert.equal(displayRefs[2].text, "v1.0.0");
+})
+
+test("parseCommitLog: parses unit-separated git log lines into rich commit objects", () => {
+  const line1 = [
+    "c0ffee0123456789abcdef0123456789abcdef01",
+    "parent1 parent2",
+    "Alice",
+    "alice@example.com",
+    "1700000000",
+    "HEAD -> refs/heads/main, refs/remotes/origin/main",
+    "feat: add parallel loading",
+  ].join("\x1f");
+
+  const line2 = [
+    "deadbeef23456789abcdef0123456789abcdef01",
+    "",
+    "Bob",
+    "bob@example.com",
+    "1699999000",
+    "tag: refs/tags/v0.1.0",
+    "chore: initial commit",
+  ].join("\x1f");
+
+  const commits = parseCommitLog(`${line1}\n${line2}\n`);
+  assert.equal(commits.length, 2);
+
+  assert.equal(commits[0].hash, "c0ffee0123456789abcdef0123456789abcdef01");
+  assert.equal(commits[0].shortHash, "c0ffee0");
+  assert.deepEqual(commits[0].parents, ["parent1", "parent2"]);
+  assert.equal(commits[0].author, "Alice");
+  assert.equal(commits[0].email, "alice@example.com");
+  assert.equal(commits[0].timestamp, 1700000000);
+  assert.equal(commits[0].subject, "feat: add parallel loading");
+  assert.equal(commits[0].isHead, true);
+  assert.equal(commits[0].displayRefs.length, 1);
+  assert.equal(commits[0].displayRefs[0].text, "main");
+  assert.equal(commits[0].displayRefs[0].isHead, true);
+  assert.deepEqual(commits[0].displayRefs[0].pairedRemote, { kind: "remote", text: "origin/main" });
+
+  assert.equal(commits[1].hash, "deadbeef23456789abcdef0123456789abcdef01");
+  assert.deepEqual(commits[1].parents, []);
+  assert.equal(commits[1].author, "Bob");
+  assert.equal(commits[1].isHead, false);
+  assert.equal(commits[1].displayRefs.length, 1);
+  assert.equal(commits[1].displayRefs[0].kind, "tag");
+  assert.equal(commits[1].displayRefs[0].text, "v0.1.0");
+
+  // Empty input returns empty array
+  assert.deepEqual(parseCommitLog(""), []);
+  assert.deepEqual(parseCommitLog(null), []);
+})
