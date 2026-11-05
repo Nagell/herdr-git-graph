@@ -99,6 +99,7 @@ const CLEAN_AGENT_MODEL_PREFERENCE = [
 ];
 const CLEAN_AGENT_MODEL = CLEAN_AGENT_MODEL_PREFERENCE[0];
 const CLEAN_AGENT_MODEL_KEY = "git-graph.cleanAgentModel";
+const CLEAN_AGENT_WORKER_KEY = "git-graph.activeTreeAgent";
 const CLEAN_AGENT_LABEL = "AI commit worker";
 // The progress toast stays spinning until the worker settles; the timeout is
 // only a safety net (milliseconds). finishTreeAgent closes it as soon as the
@@ -445,12 +446,16 @@ export default class GitGraph extends View {
 
     // Background AI commit worker. The terminal it runs in is closed as soon
     // as its commits land and the tree is clean.
-    this.treeAgent = null; // { address, name, sessionId, headBefore, ... }
+    this.treeAgent = this.getTreeAgent(); // { address, name, sessionId, headBefore, ... }
     this.treeAgentStarting = false;
     this.treeAgentModel = null; // last resolved model id
     this.cleanModelsCache = null; // { at, root, on, models } from `opencode models`
     this.opencodeInstalled = props()?.noOpencode ? false : null; // boolean | null when unknown
     this.installingOpencode = false;
+
+    if (this.treeAgent && !this.treeAgent.finished) {
+      cx.timer.after(500, (cx) => this.pollTreeAgent(cx));
+    }
 
     if (props()?.openModelPicker) {
       cx.timer.after(300, (cx) => {
@@ -4240,11 +4245,9 @@ export default class GitGraph extends View {
                   .hover((s) => s.bg(color(t.hover)))
                   .on_click((_e, cx) => {
                     this.branchDropdownOpen = false;
-                    if (this.treeAgentBusy() && this.treeAgent?.address) {
-                      run("terminal.peek", { terminal: this.treeAgent.address });
-                      if (!this.treeAgent.toastId) {
-                        this.treeAgent.toastId = this.showTreeAgentProgressToast(this.treeAgent, this.treeAgent.model);
-                      }
+                    const agent = this.getTreeAgent();
+                    if (this.treeAgentBusy() && agent?.address) {
+                      run("terminal.peek", { terminal: agent.address });
                       return;
                     }
                     this.startTreeAgent(cx);
@@ -4347,10 +4350,20 @@ export default class GitGraph extends View {
       .child(svg(icon).size(12).text_color(color(running ? t.accent : t.dim)));
   }
 
+  getTreeAgent() {
+    return this.treeAgent || shared(CLEAN_AGENT_WORKER_KEY) || null;
+  }
+
+  setTreeAgent(agent) {
+    this.treeAgent = agent;
+    setShared(CLEAN_AGENT_WORKER_KEY, agent);
+  }
+
   /** Live status of the background AI worker, or null when it is idle/gone. */
   treeAgentStatus() {
-    if (!this.treeAgent?.address) return null;
-    const term = terminals().find((t) => t.address === this.treeAgent.address);
+    const agent = this.getTreeAgent();
+    if (!agent?.address) return null;
+    const term = terminals().find((t) => t.address === agent.address);
     if (!term || term.state !== "live") return null;
     return term.status || null;
   }
@@ -4358,7 +4371,7 @@ export default class GitGraph extends View {
   /** True while the launched AI worker still owns the working tree. */
   treeAgentBusy() {
     if (this.treeAgentStarting) return true;
-    const agent = this.treeAgent;
+    const agent = this.getTreeAgent();
     if (!agent || agent.finished) return false;
     // Once `hc run` returns, the worker keeps the button locked until its
     // session is done and the tree is clean (or its terminal is gone and the
@@ -4899,15 +4912,12 @@ export default class GitGraph extends View {
       level: "info",
       icon: this.treeAgentSpinnerIcon(),
       timeout: CLEAN_AGENT_TOAST_TIMEOUT,
-      keepOpen: true,
-      persistent: true,
       ...(agent.address
         ? {
             action: {
               name: "terminal.peek",
               args: { terminal: agent.address },
               close: false,
-              dismiss: false,
             },
           }
         : {}),
@@ -4916,9 +4926,12 @@ export default class GitGraph extends View {
 
   /** Dismisses the worker's progress toast once it is no longer running. */
   closeTreeAgentToast(agent) {
-    if (!agent?.toastId) return;
-    closeOverlay(agent.toastId);
-    agent.toastId = null;
+    const toastId = agent?.toastId || this.treeAgent?.toastId || this.getTreeAgent()?.toastId;
+    if (toastId) {
+      closeOverlay(toastId);
+    }
+    if (agent) agent.toastId = null;
+    if (this.treeAgent) this.treeAgent.toastId = null;
   }
 
   /**
@@ -4932,8 +4945,9 @@ export default class GitGraph extends View {
    * @param {import("./gpui-kit.js").Context} cx
    */
   pollTreeAgent(cx) {
-    const agent = this.treeAgent;
+    const agent = this.getTreeAgent();
     if (!agent?.sessionId || agent.finished) return;
+    this.treeAgent = agent;
     if (agent.polling) {
       if (agent.pollStartedAt && Date.now() - agent.pollStartedAt > 30000) {
         agent.polling = false;
@@ -4952,6 +4966,7 @@ export default class GitGraph extends View {
     if (!live || (!agent.found && elapsed > 30000)) {
       agent.busy = false;
       agent.idleSince = agent.idleSince || Date.now();
+      this.setTreeAgent(agent);
       this.checkTreeAgentFinished(cx, agent);
       return;
     }
@@ -4965,7 +4980,8 @@ export default class GitGraph extends View {
           cwd: agent.root,
           on: agent.on,
         });
-        if (this.treeAgent !== agent || agent.pollGen !== pollGen) return;
+        const current = this.getTreeAgent();
+        if (!current || current.sessionId !== agent.sessionId || agent.pollGen !== pollGen) return;
         if (r.code !== 0) return;
         const payload = JSON.parse(r.stdout);
         const session = payload?.data ?? payload;
@@ -4973,7 +4989,7 @@ export default class GitGraph extends View {
         const started = time.busy || time.created;
         const failed = session?.outcome === "failed" || session?.outcome === "error";
         const busy = !failed && Boolean(started) && (!time.idle || time.idle < started);
-        if (this.treeAgent !== agent || agent.pollGen !== pollGen) return;
+        if (this.getTreeAgent()?.sessionId !== agent.sessionId || agent.pollGen !== pollGen) return;
         agent.found = true;
         if (failed) {
           agent.failed = true;
@@ -5001,6 +5017,7 @@ export default class GitGraph extends View {
           agent.idleSince = Date.now();
         }
         agent.busy = busy;
+        this.setTreeAgent(agent);
         cx.notify();
         if (!busy) this.checkTreeAgentFinished(cx, agent);
       } catch {
@@ -5019,7 +5036,8 @@ export default class GitGraph extends View {
    * tree with a dead terminal means it failed, so offer another model.
    */
   checkTreeAgentFinished(cx, agent) {
-    if (this.treeAgent !== agent || agent.finished || agent.checking) return;
+    const current = this.getTreeAgent();
+    if (!current || current.sessionId !== agent.sessionId || agent.finished || agent.checking) return;
     const term = terminals().find((t) => t.address === agent.address);
     const live = agent.address ? Boolean(term) && term.state === "live" : true;
     const idleMs = Date.now() - (agent.idleSince || agent.startedAt || Date.now());
@@ -5044,13 +5062,13 @@ export default class GitGraph extends View {
           [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"],
           { cwd: agent.root, on: agent.on }
         );
-        if (this.treeAgent !== agent || agent.finished) return;
+        if (this.getTreeAgent()?.sessionId !== agent.sessionId || agent.finished) return;
         if (status.code !== 0) return;
 
         if (status.stdout.trim()) {
           if ((!live || agent.failed) && !agent.retryOffered) {
             agent.retryOffered = true;
-            this.treeAgent = null;
+            this.setTreeAgent(null);
             this.treeAgentStarting = false;
             this.closeTreeAgentToast(agent);
             this.closeTreeAgentTab(agent);
@@ -5102,11 +5120,11 @@ export default class GitGraph extends View {
         const countArgs = from ? ["rev-list", "--count", `${from}..HEAD`] : ["rev-list", "--count", "HEAD"];
         const count = await exec("git", countArgs, { cwd: agent.root, on: agent.on });
         if (count.code === 0) commitCount = Number(count.stdout.trim()) || 0;
-        if (this.treeAgent !== agent || agent.finished) return;
+        if (this.getTreeAgent()?.sessionId !== agent.sessionId || agent.finished) return;
         this.finishTreeAgent(agent, cx, commitCount);
       } finally {
         agent.checking = false;
-        if (this.treeAgent === agent) cx.notify();
+        if (this.getTreeAgent()?.sessionId === agent.sessionId) cx.notify();
       }
     });
   }
@@ -5126,9 +5144,10 @@ export default class GitGraph extends View {
 
   /** The commits landed and the tree is clean: close the worker for good. */
   finishTreeAgent(agent, cx, commitCount) {
-    if (this.treeAgent !== agent) return;
+    const current = this.getTreeAgent();
+    if (current && current.sessionId !== agent.sessionId) return;
     agent.finished = true;
-    this.treeAgent = null;
+    this.setTreeAgent(null);
     this.treeAgentStarting = false;
     this.closeTreeAgentToast(agent);
     this.closeTreeAgentTab(agent);
@@ -5189,6 +5208,7 @@ export default class GitGraph extends View {
       "If a merge, rebase, cherry-pick, or revert is in progress, understand and resolve every conflict, stage the resolutions, and complete the operation non-interactively with `git -c core.editor=true merge --continue` (or rebase/cherry-pick/revert --continue). Always pass -m to git commit.",
       "Then split the remaining changes into cohesive atomic commits, staging only the files that belong to each commit. Validate each slice when the repository has a quick check.",
       "Never run git push or any remote-writing command. Do not fetch, force-push, rewrite history, reset --hard, or discard user work. Do not run git clean or amend existing commits.",
+      "Do not run sync.sh, herdr-app, or touch ~/.config/herdr-app: herdr-git-graph manages synchronization and UI lifecycle automatically.",
       "When done, report the commits you created and confirm the working tree is clean. If there is nothing to commit and no operation to finish, say so and stop.",
     ]
       .filter(Boolean)
@@ -5305,8 +5325,8 @@ export default class GitGraph extends View {
           retryOffered: false,
           toastId: null,
         };
-        this.treeAgent = agent;
         agent.toastId = this.showTreeAgentProgressToast(agent, model);
+        this.setTreeAgent(agent);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         notify({
@@ -5375,11 +5395,9 @@ export default class GitGraph extends View {
         this.openCleanAgentModelPicker(cx);
       })
       .on_click((_e, cx) => {
-        if (busy && this.treeAgent?.address) {
-          run("terminal.peek", { terminal: this.treeAgent.address });
-          if (!this.treeAgent.toastId) {
-            this.treeAgent.toastId = this.showTreeAgentProgressToast(this.treeAgent, this.treeAgent.model);
-          }
+        const agent = this.getTreeAgent();
+        if (busy && agent?.address) {
+          run("terminal.peek", { terminal: agent.address });
           return;
         }
         if (this.opencodeInstalled === false) {
