@@ -2,7 +2,7 @@
 // A visual Git graph viewer with topological branch lanes, commit history,
 // working tree inspection, hierarchical file tree, and interactive diff viewer.
 
-import { View, div, svg, uniform_list } from "gpui-kit";
+import { View, div, svg, uniform_list, PathBuilder } from "gpui-kit";
 import {
   v_flex,
   h_flex,
@@ -2957,29 +2957,28 @@ export default class GitGraph extends View {
     const centerY = 15;
     const startX = 12;
     const strokeW = 2;
+    const totalGraphWidth = Math.max(64, startX + (this.maxLane + 1) * laneWidth + 12);
     const elements = [];
     const laneX = (lane) => startX + lane * laneWidth;
     const laneColor = (idx) => color(getLaneColor(idx, t));
     const wtColor = color(t.working || t.ansi3 || t.accent);
     const stashColor = color(t.ansi3 || t.accent);
 
-    // Every edge runs node-row center to node-row center as one cosine S-curve
+    // Every edge runs node-row center to node-row center as one smooth S-curve
     // (vertical at both ends), split across the two rows it crosses: the upper
     // half is drawn in the row it leaves, the lower half in the row it enters.
-    // Curves are sampled as overlapping 1px-step slices (stroke-tall, so slopes
-    // keep the rail weight); working-tree edges are dotted.
+    // Curves are rendered via PathBuilder with cubic Bezier curves for smooth,
+    // anti-aliased detours.
     const edge = (id, e, half) => {
       const c = e.fromWorkingTree ? wtColor : laneColor(e.colorIdx);
       const x1 = laneX(e.from);
-      const dx = laneX(e.to) - x1;
+      const x2 = laneX(e.to);
+      const dx = x2 - x1;
+
       // Row-local y range and the matching span of the full curve (0..1).
       const y0 = half === "down" ? centerY : 0;
       const y1 = half === "down" ? height : centerY;
-      const v0 = half === "down" ? 0 : 0.5;
-      const at = (y) => {
-        const v = v0 + ((y - y0) / (y1 - y0)) * 0.5;
-        return x1 + (dx * (1 - Math.cos(Math.PI * v))) / 2;
-      };
+
       if (dx === 0 && !e.fromWorkingTree) {
         return [
           div()
@@ -2992,23 +2991,37 @@ export default class GitGraph extends View {
             .bg(c),
         ];
       }
-      const out = [];
-      for (let y = y0; y < y1; y++) {
-        if (e.fromWorkingTree && y % 4 >= 2) continue;
-        const xa = at(y);
-        const xb = at(y + 1);
-        out.push(
-          div()
-            .id(`${id}-s${y}`)
-            .absolute()
-            .left(Math.min(xa, xb) - strokeW / 2)
-            .top(y)
-            .w(Math.abs(xb - xa) + strokeW)
-            .h(Math.min(strokeW, y1 - y))
-            .bg(c)
+
+      const builder = PathBuilder.stroke(strokeW);
+      if (e.fromWorkingTree) {
+        builder.dash_array([3, 2]);
+      }
+
+      if (dx === 0) {
+        builder.move_to(x1, y0).line_to(x1, y1);
+      } else if (half === "down") {
+        builder.move_to(x1, 15).cubic_bezier_to(
+          x1 + 0.5 * dx, 30,
+          x1, 22.5,
+          x1 + 0.25 * dx, 26.25
+        );
+      } else {
+        builder.move_to(x1 + 0.5 * dx, 0).cubic_bezier_to(
+          x2, 15,
+          x1 + 0.75 * dx, 3.75,
+          x2, 7.5
         );
       }
-      return out;
+
+      return [
+        window.paint_path(builder.build(), c)
+          .id(id)
+          .absolute()
+          .left(0)
+          .top(0)
+          .w(totalGraphWidth)
+          .h(height),
+      ];
     };
 
     (commit.edgesUp || []).forEach((e, i) => {
@@ -3071,7 +3084,6 @@ export default class GitGraph extends View {
       elements.push(node(10).bg(myColor));
     }
 
-    const totalGraphWidth = Math.max(64, startX + (this.maxLane + 1) * laneWidth + 12);
     return div().relative().w(totalGraphWidth).h(height).flex_none().children(elements);
   }
 
@@ -3087,15 +3099,24 @@ export default class GitGraph extends View {
 
     return h_flex()
       .id("commit-working-tree")
+      .relative()
       .w_full()
       .h(30)
       .flex_none()
       .items_center()
-      .border_b(1)
-      .border_color(color(t.border))
       .cursor_pointer()
       .when(isSelected, (e) => e.bg(color(t.selected)))
       .hover((s) => s.bg(color(isSelected ? t.selected : t.hover)))
+      .child(
+        div()
+          .id("wt-row-separator")
+          .absolute()
+          .left(0)
+          .right(0)
+          .bottom(0)
+          .h(1)
+          .bg(color(t.border))
+      )
       .child(this.renderGraphLanes(item, t))
       .child(div().id("wt-graph-divider").w(1).h_full().flex_none().bg(color(t.border)))
       .child(
@@ -3164,16 +3185,25 @@ export default class GitGraph extends View {
 
     return h_flex()
       .id(`commit-stash-${item.hash}`)
+      .relative()
       .w_full()
       .h(30)
       .flex_none()
       .items_center()
-      .border_b(1)
-      .border_color(color(t.border))
       .cursor_pointer()
       .when(isSelected, (e) => e.bg(color(t.selected)))
       .when(!isSelected, (e) => e.bg(color((t.ansi3 || t.accent) + "0d")))
       .hover((s) => s.bg(color(isSelected ? t.selected : t.hover)))
+      .child(
+        div()
+          .id(`stash-row-separator-${item.hash}`)
+          .absolute()
+          .left(0)
+          .right(0)
+          .bottom(0)
+          .h(1)
+          .bg(color(t.border))
+      )
       .child(this.renderGraphLanes(item, t))
       .child(div().id("stash-graph-divider").w(1).h_full().flex_none().bg(color(t.border)))
       .child(
@@ -3272,17 +3302,29 @@ export default class GitGraph extends View {
     // The graph column is closed by a 1px rule; badges start after it.
     let curX = graphWidth + 1;
 
-    // Badges are laid out at a fixed, estimated width so the hit boxes recorded
-    // in `_badgeBoxes` match the painted boxes exactly. Measuring them with
-    // `on_size_change` is not an option here: handlers registered inside a
-    // virtual-list item renderer throw, which blanks the whole list.
+    const charWidth = (str) => {
+      let w = 0;
+      for (let i = 0; i < str.length; i++) {
+        const ch = str[i];
+        if ("ijl|!':.,; -_".includes(ch)) w += 3.2;
+        else if ("frt".includes(ch)) w += 4.0;
+        else if ("mwMW@".includes(ch)) w += 7.8;
+        else if (ch >= "A" && ch <= "Z") w += 6.2;
+        else if (ch >= "0" && ch <= "9") w += 5.5;
+        else w += 5.2;
+      }
+      return Math.ceil(w);
+    };
+
+    // Badges are laid out at an accurate estimated width so the hit boxes recorded
+    // in `_badgeBoxes` match the painted boxes exactly, without lopsided padding.
     const badgeWidth = (ref) => {
       const maxBadgeW = isCompact ? 118 : 190;
       if (ref.kind === "head") return 46;
-      const textWidth = Math.ceil(ref.text.length * 6.2);
+      const textWidth = charWidth(ref.text);
       if (ref.pairedRemote) {
-        const remoteW = Math.ceil((ref.pairedRemote.text.split("/")[0] || "").length * 6.2);
-        return Math.min(maxBadgeW, 34 + textWidth + remoteW);
+        const remoteW = charWidth(ref.pairedRemote.text.split("/")[0] || "");
+        return Math.min(maxBadgeW, 37 + textWidth + remoteW);
       }
       return Math.min(maxBadgeW, 28 + textWidth);
     };
@@ -3293,8 +3335,8 @@ export default class GitGraph extends View {
       // Combined pills store two hit boxes (branch and remote) so clicking
       // either side still filters to that ref.
       if (ref.pairedRemote) {
-        const branchW = Math.ceil(ref.text.length * 6.2);
-        const splitAt = Math.max(12, Math.min(badgeW - 2, 21 + branchW));
+        const branchW = charWidth(ref.text);
+        const splitAt = Math.max(12, Math.min(badgeW - 2, 23 + branchW));
         commit._badgeBoxes.push({ ref, xStart: curX, xEnd: curX + splitAt });
         commit._badgeBoxes.push({ ref: ref.pairedRemote, xStart: curX + splitAt, xEnd: curX + badgeW });
       } else {
@@ -3309,8 +3351,8 @@ export default class GitGraph extends View {
           .flex_none()
           .gap(4)
           .items_center()
-          .px(5)
-          .py(1)
+          .px(6)
+          .py(1.5)
           .rounded(5)
           .bg(color(t.accent))
           .text_color(color(t.accent_foreground))
@@ -3339,8 +3381,8 @@ export default class GitGraph extends View {
           .flex_none()
           .gap(4)
           .items_center()
-          .px(5)
-          .py(1)
+          .px(6)
+          .py(1.5)
           .rounded(5)
           .bg(color(bColor + "26"))
           .border_1()
@@ -3369,8 +3411,8 @@ export default class GitGraph extends View {
         .flex_none()
         .gap(4)
         .items_center()
-        .px(5)
-        .py(1)
+        .px(6)
+        .py(1.5)
         .rounded(5)
         .bg(color(isFilteredThis ? bColor : bColor + "26"))
         .border_1()
@@ -3418,15 +3460,24 @@ export default class GitGraph extends View {
 
     return h_flex()
       .id(`commit-${commit.hash}`)
+      .relative()
       .w_full()
       .h(30)
       .flex_none()
       .items_center()
-      .border_b(1)
-      .border_color(color(t.border))
       .cursor_pointer()
       .when(isSelected, (e) => e.bg(color(t.selected)))
       .hover((s) => s.bg(color(isSelected ? t.selected : t.hover)))
+      .child(
+        div()
+          .id(`row-separator-${commit.hash}`)
+          .absolute()
+          .left(0)
+          .right(0)
+          .bottom(0)
+          .h(1)
+          .bg(color(t.border))
+      )
       .child(this.renderGraphLanes(commit, t))
       .child(div().id(`graph-divider-${commit.hash}`).w(1).h_full().flex_none().bg(color(t.border)))
       .child(
