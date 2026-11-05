@@ -103,6 +103,9 @@ const CLEAN_AGENT_MODEL = CLEAN_AGENT_MODEL_PREFERENCE[0];
 const CLEAN_AGENT_MODEL_KEY = "git-graph.cleanAgentModel";
 const CLEAN_AGENT_WORKER_KEY = "git-graph.activeTreeAgent";
 const CLEAN_AGENT_LABEL = "AI commit worker";
+// How long one copy of the mod holds the shared poll lease (milliseconds).
+// Longer than a slow `opencode api` call, shorter than a stalled poll's wait.
+const CLEAN_AGENT_POLL_LEASE_MS = 30 * 1000;
 // The progress toast stays spinning until the worker settles; the timeout is
 // only a safety net (milliseconds). finishTreeAgent closes it as soon as the
 // commits land or the worker fails. GIF icons animate natively in the toast,
@@ -369,14 +372,14 @@ export default class GitGraph extends View {
 
     // Background AI commit worker. The terminal it runs in is closed as soon
     // as its commits land and the tree is clean.
-    this.treeAgent = this.getTreeAgent(); // { address, name, sessionId, headBefore, ... }
     this.treeAgentStarting = false;
+    this.treeAgentChecking = false; // this copy has a finish/stop check in flight
+    this.treeAgentCheck = null; // { sessionId, at } of this copy's last finish check
     this.treeAgentModel = null; // last resolved model id
     this.cleanModelsCache = null; // { at, root, on, models } from `opencode models`
     this.opencodeInstalled = props()?.noOpencode ? false : null; // boolean | null when unknown
-    this.installingOpencode = false;
 
-    if (this.treeAgent && !this.treeAgent.finished) {
+    if (this.getTreeAgent()) {
       cx.timer.after(500, (cx) => this.pollTreeAgent(cx));
     }
 
@@ -435,7 +438,11 @@ export default class GitGraph extends View {
 
     this.wasVisible = this.isViewVisible();
     this.refresh(cx);
-    cx.timer.every(10000, (cx) => this.refresh(cx));
+    // Hidden copies (other tabs or spaces) skip the git sweep: the visibility
+    // watcher below refreshes them as soon as they are shown again.
+    cx.timer.every(10000, (cx) => {
+      if (this.isViewVisible()) this.refresh(cx);
+    });
     // Switching spaces or opening the Changes panel does not re-render the
     // panel by itself: watch visibility and location (in memory only, no git)
     // so the graph reloads automatically as soon as it opens or changes.
@@ -458,7 +465,12 @@ export default class GitGraph extends View {
     this.watched = null;
     this.watchToken = null;
     // A closed graph tab must not leave a 12-hour progress toast behind.
-    this.closeTreeAgentToast(this.treeAgent);
+    // Its poll timer dies with it, so the toast cannot be left for later.
+    const worker = this.getTreeAgent();
+    if (worker?.toastId) {
+      this.closeTreeAgentToast(worker);
+      this.setTreeAgent({ ...worker, toastId: null });
+    }
   }
 
   /** Reads the one diff this tab was opened for, as a unified diff string. */
@@ -4304,13 +4316,38 @@ export default class GitGraph extends View {
       .child(svg(icon).size(12).text_color(color(running ? t.accent : t.dim)));
   }
 
+  /**
+   * The background worker, read from shared state every time. Each open copy
+   * of this mod keeps its own JS state, so a cached copy here would go stale
+   * and let a finished worker keep being reported by another copy.
+   *
+   * @returns {Record<string, any> | null}
+   */
   getTreeAgent() {
-    return this.treeAgent || shared(CLEAN_AGENT_WORKER_KEY) || null;
+    return shared(CLEAN_AGENT_WORKER_KEY) ?? null;
   }
 
+  /**
+   * @param {Record<string, any> | null} agent
+   */
   setTreeAgent(agent) {
-    this.treeAgent = agent;
     setShared(CLEAN_AGENT_WORKER_KEY, agent);
+  }
+
+  /**
+   * Atomically takes the worker out of shared state. Every open copy of the
+   * mod follows the same worker, so several copies can reach the same outcome
+   * (finished or stopped). Only the copy that wins this claim reports it and
+   * closes the terminal; the others find no worker and stop.
+   *
+   * @param {string} sessionId
+   * @returns {Record<string, any> | null} the claimed worker, or null if another copy already took it
+   */
+  claimTreeAgent(sessionId) {
+    const current = this.getTreeAgent();
+    if (!current || current.sessionId !== sessionId) return null;
+    this.setTreeAgent(null);
+    return current;
   }
 
   /** Live status of the background AI worker, or null when it is idle/gone. */
@@ -4326,7 +4363,7 @@ export default class GitGraph extends View {
   treeAgentBusy() {
     if (this.treeAgentStarting) return true;
     const agent = this.getTreeAgent();
-    if (!agent || agent.finished) return false;
+    if (!agent) return false;
     // Once `hc run` returns, the worker keeps the button locked until its
     // session is done and the tree is clean (or its terminal is gone and the
     // finish check retires it).
@@ -4878,14 +4915,14 @@ export default class GitGraph extends View {
     });
   }
 
-  /** Dismisses the worker's progress toast once it is no longer running. */
+  /**
+   * Dismisses the worker's progress toast once it is no longer running.
+   *
+   * @param {Record<string, any> | null} agent the worker whose toast to close
+   */
   closeTreeAgentToast(agent) {
-    const toastId = agent?.toastId || this.treeAgent?.toastId || this.getTreeAgent()?.toastId;
-    if (toastId) {
-      closeOverlay(toastId);
-    }
+    if (agent?.toastId) closeOverlay(agent.toastId);
     if (agent) agent.toastId = null;
-    if (this.treeAgent) this.treeAgent.toastId = null;
   }
 
   /**
@@ -4900,42 +4937,35 @@ export default class GitGraph extends View {
    */
   pollTreeAgent(cx) {
     const agent = this.getTreeAgent();
-    if (!agent?.sessionId || agent.finished) return;
-    this.treeAgent = agent;
-    if (agent.polling) {
-      if (agent.pollStartedAt && Date.now() - agent.pollStartedAt > 30000) {
-        agent.polling = false;
-      } else {
-        return;
-      }
-    }
+    if (!agent?.sessionId) return;
+    // Every open copy of the mod runs this timer, but only one may hold the
+    // poll lease, so the session is queried once per interval, not once per copy.
+    const now = Date.now();
+    if (agent.pollUntil && agent.pollUntil > now) return;
+
     const term = terminals().find((t) => t.address === agent.address);
     // A missing address means `hc run`'s JSON was unusable; follow the session
     // instead of treating the worker as already gone.
     const live = agent.address ? Boolean(term) && term.state === "live" : true;
-    const elapsed = Date.now() - (agent.startedAt || 0);
+    const elapsed = now - (agent.startedAt || 0);
 
     // `hc run` returns before the terminal shows up; give it a moment.
     if (!live && !agent.found && elapsed < 15000) return;
     if (!live || (!agent.found && elapsed > 30000)) {
-      agent.busy = false;
-      agent.idleSince = agent.idleSince || Date.now();
-      this.setTreeAgent(agent);
-      this.checkTreeAgentFinished(cx, agent);
+      const gone = { ...agent, busy: false, idleSince: agent.idleSince || now };
+      this.checkTreeAgentFinished(cx, gone);
       return;
     }
 
-    agent.polling = true;
-    agent.pollStartedAt = Date.now();
-    const pollGen = (agent.pollGen = (agent.pollGen || 0) + 1);
+    this.setTreeAgent({ ...agent, pollUntil: now + CLEAN_AGENT_POLL_LEASE_MS });
     cx.spawn(async (cx) => {
+      let settled = false;
       try {
         const r = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}`], {
           cwd: agent.root,
           on: agent.on,
         });
-        const current = this.getTreeAgent();
-        if (!current || current.sessionId !== agent.sessionId || agent.pollGen !== pollGen) return;
+        if (this.getTreeAgent()?.sessionId !== agent.sessionId) return;
         if (r.code !== 0) return;
         const payload = JSON.parse(r.stdout);
         const session = payload?.data ?? payload;
@@ -4943,45 +4973,67 @@ export default class GitGraph extends View {
         const started = time.busy || time.created;
         const failed = session?.outcome === "failed" || session?.outcome === "error";
         const busy = !failed && Boolean(started) && (!time.idle || time.idle < started);
-        if (this.getTreeAgent()?.sessionId !== agent.sessionId || agent.pollGen !== pollGen) return;
-        agent.found = true;
+
+        const error = failed && !agent.errorMessage ? await this.readTreeAgentError(agent) : {};
+        // Re-read after the await: another copy may have claimed the worker
+        // meanwhile, and writing back would revive it.
+        const latest = this.getTreeAgent();
+        if (latest?.sessionId !== agent.sessionId) return;
+
+        const next = { ...latest, ...error, pollUntil: 0, found: true, busy };
         if (failed) {
-          agent.failed = true;
-          agent.busy = false;
-          agent.idleSince = agent.idleSince || Date.now();
-          try {
-            const mRes = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}/message`], {
-              cwd: agent.root,
-              on: agent.on,
-            });
-            if (mRes.code === 0) {
-              const mData = JSON.parse(mRes.stdout);
-              const list = Array.isArray(mData?.data) ? mData.data : Array.isArray(mData) ? mData : [];
-              const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
-              if (errEntry?.error) {
-                agent.errorMessage = errEntry.error.message || errEntry.error.type;
-                agent.errorType = errEntry.error.type;
-              }
-            }
-          } catch {}
+          next.failed = true;
+          next.idleSince = latest.idleSince || Date.now();
         } else if (busy) {
-          agent.sawBusy = true;
-          agent.idleSince = null;
-        } else if (agent.busy !== false) {
-          agent.idleSince = Date.now();
+          next.sawBusy = true;
+          next.idleSince = null;
+        } else if (latest.busy !== false) {
+          next.idleSince = Date.now();
         }
-        agent.busy = busy;
-        this.setTreeAgent(agent);
+        this.setTreeAgent(next);
+        settled = true;
         cx.notify();
-        if (!busy) this.checkTreeAgentFinished(cx, agent);
+        if (!busy) this.checkTreeAgentFinished(cx, next);
       } catch {
         // The API may not be available; the terminal-status fallback applies.
       } finally {
-        if (agent.pollGen === pollGen) {
-          agent.polling = false;
-        }
+        if (!settled) this.releaseTreeAgentPoll(agent.sessionId);
       }
     });
+  }
+
+  /** Clears this copy's poll lease after a poll that did not write its result. */
+  releaseTreeAgentPoll(sessionId) {
+    const latest = this.getTreeAgent();
+    if (latest?.sessionId === sessionId && latest.pollUntil) {
+      this.setTreeAgent({ ...latest, pollUntil: 0 });
+    }
+  }
+
+  /**
+   * The session's last error message and type, if OpenCode recorded one.
+   *
+   * @param {{ sessionId: string; root: string; on: string | null }} agent
+   * @returns {Promise<{ errorMessage?: string; errorType?: string }>}
+   */
+  async readTreeAgentError(agent) {
+    try {
+      const mRes = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}/message`], {
+        cwd: agent.root,
+        on: agent.on,
+      });
+      if (mRes.code !== 0) return {};
+      const mData = JSON.parse(mRes.stdout);
+      const list = Array.isArray(mData?.data) ? mData.data : Array.isArray(mData) ? mData : [];
+      const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
+      if (!errEntry?.error) return {};
+      return {
+        errorMessage: errEntry.error.message || errEntry.error.type,
+        errorType: errEntry.error.type,
+      };
+    } catch {
+      return {};
+    }
   }
 
   /**
@@ -4990,8 +5042,7 @@ export default class GitGraph extends View {
    * tree with a dead terminal means it failed, so offer another model.
    */
   checkTreeAgentFinished(cx, agent) {
-    const current = this.getTreeAgent();
-    if (!current || current.sessionId !== agent.sessionId || agent.finished || agent.checking) return;
+    if (this.getTreeAgent()?.sessionId !== agent.sessionId) return;
     const term = terminals().find((t) => t.address === agent.address);
     const live = agent.address ? Boolean(term) && term.state === "live" : true;
     const idleMs = Date.now() - (agent.idleSince || agent.startedAt || Date.now());
@@ -5002,9 +5053,13 @@ export default class GitGraph extends View {
         (agent.busy === false && ((agent.sawBusy && idleMs >= 3000) || (!agent.sawBusy && idleMs >= 30000)))
       : true;
     if (!settled) return;
-    if (agent.lastCheckAt && Date.now() - agent.lastCheckAt < 5000) return;
-    agent.checking = true;
-    agent.lastCheckAt = Date.now();
+    // Throttle and in-flight state are per copy: they only limit this copy's
+    // git calls. The shared claim below decides the outcome for all copies.
+    const last = this.treeAgentCheck;
+    if (this.treeAgentChecking) return;
+    if (last?.sessionId === agent.sessionId && Date.now() - last.at < 5000) return;
+    this.treeAgentCheck = { sessionId: agent.sessionId, at: Date.now() };
+    this.treeAgentChecking = true;
 
     cx.spawn(async (cx) => {
       try {
@@ -5016,55 +5071,18 @@ export default class GitGraph extends View {
           [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"],
           { cwd: agent.root, on: agent.on }
         );
-        if (this.getTreeAgent()?.sessionId !== agent.sessionId || agent.finished) return;
+        if (this.getTreeAgent()?.sessionId !== agent.sessionId) return;
         if (status.code !== 0) return;
 
         if (status.stdout.trim()) {
-          if ((!live || agent.failed) && !agent.retryOffered) {
-            agent.retryOffered = true;
-            this.setTreeAgent(null);
+          if (!live || agent.failed) {
+            // Claim first: a copy that loses the claim must not report the stop again.
+            const claimed = this.claimTreeAgent(agent.sessionId);
+            if (!claimed) return;
             this.treeAgentStarting = false;
-            this.closeTreeAgentToast(agent);
-            this.closeTreeAgentTab(agent);
-
-            if (!agent.errorMessage && agent.sessionId) {
-              try {
-                const mRes = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}/message`], {
-                  cwd: agent.root,
-                  on: agent.on,
-                });
-                if (mRes.code === 0) {
-                  const mData = JSON.parse(mRes.stdout);
-                  const list = Array.isArray(mData?.data) ? mData.data : Array.isArray(mData) ? mData : [];
-                  const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
-                  if (errEntry?.error) {
-                    agent.errorMessage = errEntry.error.message || errEntry.error.type;
-                    agent.errorType = errEntry.error.type;
-                  }
-                }
-              } catch {}
-            }
-
-            const isLimit =
-              agent.errorType === "provider.free-limit" ||
-              /limit|quota|rate\s*limit|429/i.test(agent.errorMessage || "");
-            const title = isLimit ? "AI usage limit reached" : "AI commit worker stopped";
-            const detail = agent.errorMessage
-              ? agent.errorMessage
-              : !live
-              ? "The worker terminal exited before commits were completed."
-              : "The AI model stopped before the tree was clean.";
-
-            notify({
-              title,
-              body: `${detail.slice(0, 300)} · Choose another model to continue.`,
-              level: "error",
-            });
-            this.openCleanAgentModelPicker(
-              cx,
-              `${isLimit ? "⚠️ Usage limit reached: " : ""}${detail}\n\nChoose another model to retry.`
-            );
-            cx.notify();
+            this.closeTreeAgentToast(claimed);
+            this.closeTreeAgentTab(claimed);
+            this.reportTreeAgentStopped(cx, claimed, live);
           }
           return;
         }
@@ -5074,13 +5092,48 @@ export default class GitGraph extends View {
         const countArgs = from ? ["rev-list", "--count", `${from}..HEAD`] : ["rev-list", "--count", "HEAD"];
         const count = await exec("git", countArgs, { cwd: agent.root, on: agent.on });
         if (count.code === 0) commitCount = Number(count.stdout.trim()) || 0;
-        if (this.getTreeAgent()?.sessionId !== agent.sessionId || agent.finished) return;
         this.finishTreeAgent(agent, cx, commitCount);
       } finally {
-        agent.checking = false;
-        if (this.getTreeAgent()?.sessionId === agent.sessionId) cx.notify();
+        this.treeAgentChecking = false;
+        cx.notify();
       }
     });
+  }
+
+  /**
+   * Reports a worker that stopped with a dirty tree and offers another model.
+   * Called only by the copy that claimed the worker.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
+   * @param {Record<string, any>} agent the claimed worker
+   * @param {boolean} live whether its terminal was still running
+   */
+  async reportTreeAgentStopped(cx, agent, live) {
+    let errorMessage = agent.errorMessage;
+    let errorType = agent.errorType;
+    if (!errorMessage) {
+      const error = await this.readTreeAgentError(agent);
+      errorMessage = error.errorMessage;
+      errorType = error.errorType;
+    }
+    const isLimit = errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(errorMessage || "");
+    const title = isLimit ? "AI usage limit reached" : "AI commit worker stopped";
+    const detail = errorMessage
+      ? errorMessage
+      : !live
+      ? "The worker terminal exited before commits were completed."
+      : "The AI model stopped before the tree was clean.";
+
+    notify({
+      title,
+      body: `${detail.slice(0, 300)} · Choose another model to continue.`,
+      level: "error",
+    });
+    this.openCleanAgentModelPicker(
+      cx,
+      `${isLimit ? "⚠️ Usage limit reached: " : ""}${detail}\n\nChoose another model to retry.`
+    );
+    cx.notify();
   }
 
   /** Kill the worker terminal and close the tab/pane that showed it. */
@@ -5098,13 +5151,13 @@ export default class GitGraph extends View {
 
   /** The commits landed and the tree is clean: close the worker for good. */
   finishTreeAgent(agent, cx, commitCount) {
-    const current = this.getTreeAgent();
-    if (current && current.sessionId !== agent.sessionId) return;
-    agent.finished = true;
-    this.setTreeAgent(null);
+    // Only the copy that wins the claim reports success; the rest stop here,
+    // so one finished worker produces one toast no matter how many copies are open.
+    const claimed = this.claimTreeAgent(agent.sessionId);
+    if (!claimed) return;
     this.treeAgentStarting = false;
-    this.closeTreeAgentToast(agent);
-    this.closeTreeAgentTab(agent);
+    this.closeTreeAgentToast(claimed);
+    this.closeTreeAgentTab(claimed);
     notify({
       title: "AI commit worker finished",
       body:
@@ -5274,9 +5327,6 @@ export default class GitGraph extends View {
           startedAt: Date.now(),
           found: false,
           busy: null,
-          checking: false,
-          finished: false,
-          retryOffered: false,
           toastId: null,
         };
         agent.toastId = this.showTreeAgentProgressToast(agent, model);

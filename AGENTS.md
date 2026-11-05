@@ -75,6 +75,8 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - The first message carries the repository, current branch, dirty paths, and any in-progress merge/rebase/cherry-pick/revert. The agent must resolve conflicts and complete the operation, then make atomic Conventional Commits on the current branch using the `git-change-workflow` skill.
   - The task explicitly forbids pushing, fetching, force-pushing, history rewriting, `reset --hard`, and `git clean`. The button disables on a clean tree, detached HEAD, while another git action runs, or while the launched agent is still working; the progress toast can peek at its terminal.
   - Once the session goes idle **and** `git status` is clean, the worker is done: the graph dismisses the progress toast, reports how many commits were created, kills the background terminal, and closes its tab/pane. A dirty tree with a dead terminal instead dismisses the progress toast, shows an error, and opens the model picker.
+  - Every open copy of the mod follows the same worker through `shared("git-graph.activeTreeAgent")`, so the worker state is read from shared state each time (never cached per copy). Only the copy that wins `claimTreeAgent` reports the outcome, so one run yields one toast. A poll lease (`pollUntil`) lets one copy query the session per interval.
+  - A hidden copy skips its 10 s git refresh; the visibility watcher refreshes it when it is shown again.
 - **Working Tree Inspection**:
   - Inspects uncommitted changes via `git status --porcelain=v1 -z --no-renames --untracked-files=all` and diff stats.
   - Displays a top "WIP" row with `+add` / `−del` badges connected directly to HEAD in lane 0.
