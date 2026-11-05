@@ -43,6 +43,8 @@ import {
   parseRefs,
   parseCommitLog,
   resolveDisplayRefs,
+  badgeTooltip,
+  extraRefsTooltip,
   computeLanes,
   buildFileTree,
   flattenFileTree,
@@ -65,6 +67,8 @@ import {
   filterVisibleCleanModels,
   splitRemoteBranch,
   deleteRemoteBranchArgs,
+  fetchRemoteBranchArgs,
+  renameRemoteBranchPushArgs,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
 } from "./git-logic.js";
@@ -1734,6 +1738,19 @@ export default class GitGraph extends View {
             this.availableBranches.find((b) => this.branchRefKind(b) === "remote") ||
             "origin/feat/sample";
           this.openModal("confirm-delete-remote-branch", { ref: { kind: "remote", text: remoteBranch } }, cx);
+        } else if (preview === "modal-rename-branch" && this.commits.length > 0) {
+          const branchName =
+            this.availableBranches.find(
+              (b) => this.branchRefKind(b) === "local" && b !== this.currentBranch
+            ) ||
+            this.currentBranch ||
+            "my-test-branch";
+          this.openModal("rename-branch", { ref: { kind: "local", text: branchName } }, cx);
+        } else if (preview === "modal-rename-remote-branch" && this.commits.length > 0) {
+          const remoteBranch =
+            this.availableBranches.find((b) => this.branchRefKind(b) === "remote") ||
+            "origin/feat/sample";
+          this.openModal("rename-branch", { ref: { kind: "remote", text: remoteBranch } }, cx);
         } else if (preview === "modal-merge-branch" && this.commits.length > 0) {
           const branchName =
             this.availableBranches.find((b) => b !== this.currentBranch) ||
@@ -2152,18 +2169,36 @@ export default class GitGraph extends View {
     return this.remotes.some((remote) => name.startsWith(`${remote}/`)) ? "remote" : "local";
   }
 
+  /** Remote-tracking branch that mirrors a local branch name, if any. */
+  findPairedRemote(branchName) {
+    if (!branchName || !Array.isArray(this.availableBranches)) return null;
+    return (
+      this.availableBranches.find(
+        (b) =>
+          this.branchRefKind(b) === "remote" &&
+          (b.endsWith("/" + branchName) || (this.remotes?.length && b === `${this.remotes[0]}/${branchName}`))
+      ) || null
+    );
+  }
+
+  /** Local branch with exactly this name (remote-prefixed names excluded). */
+  findLocalCounterpart(branchName) {
+    if (!branchName || !Array.isArray(this.availableBranches)) return null;
+    return (
+      this.availableBranches.find((b) => b === branchName && this.branchRefKind(b) === "local") || null
+    );
+  }
+
   openBranchContextMenu(ref, e, cx, overrideX, overrideY) {
     const normRef = typeof ref === "string" ? { kind: this.branchRefKind(ref), text: ref } : { ...ref };
-    if (normRef.kind === "local" && !normRef.pairedRemote && Array.isArray(this.availableBranches)) {
-      const matchRemote = this.availableBranches.find(
-        (b) => this.branchRefKind(b) === "remote" && (b.endsWith("/" + normRef.text) || (this.remotes?.length && b === `${this.remotes[0]}/${normRef.text}`))
-      );
+    if (normRef.kind === "local" && !normRef.pairedRemote) {
+      const matchRemote = this.findPairedRemote(normRef.text);
       if (matchRemote) {
         normRef.pairedRemote = { kind: "remote", text: matchRemote };
       }
     }
     const menuWidth = 260;
-    const menuHeight = normRef.pairedRemote ? 210 : 180;
+    const menuHeight = normRef.pairedRemote ? 270 : 240;
     const origin = this.rootOrigin;
     const b = /** @type {any} */ (this.rootBounds);
     let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
@@ -2309,6 +2344,36 @@ export default class GitGraph extends View {
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
+    } else if (type === "rename-branch") {
+      const ref = target?.ref || target;
+      const isRemote = ref?.kind === "remote";
+      const oldBranch = isRemote
+        ? splitRemoteBranch(ref?.text || "", this.remotes).branch
+        : ref?.text || "";
+      const counterpartText = isRemote
+        ? this.findLocalCounterpart(oldBranch)
+        : ref?.pairedRemote?.text || this.findPairedRemote(oldBranch);
+      this.modalDialog = {
+        type,
+        ref: { kind: isRemote ? "remote" : "local", text: ref?.text || "" },
+        oldBranch,
+        counterpartText,
+        counterpartKind: counterpartText ? (isRemote ? "local" : "remote") : null,
+        renameCounterpart: Boolean(counterpartText),
+        error: null,
+      };
+      this.modalInput = InputState.new({
+        placeholder: isRemote ? "New branch name on the remote" : "New branch name",
+        value: oldBranch,
+      });
+      this.modalInput.on("change", (_e, cx) => {
+        if (this.modalDialog?.error) {
+          this.modalDialog.error = null;
+        }
+        cx.notify();
+      });
+      this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
+      this.focusModalInput(cx);
     } else if (type === "confirm-merge-branch" || type === "confirm-delete-remote-branch") {
       this.modalDialog = { type, ref: target?.ref || target, error: null };
       this.modalInput = null;
@@ -2385,6 +2450,49 @@ export default class GitGraph extends View {
       }
       if (type === "publish" && !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?$/.test(name)) {
         dialog.error = "Use letters, digits, dots, dashes, underscores, or owner/name";
+        cx.notify();
+        return;
+      }
+    }
+    if (type === "rename-branch") {
+      name = this.modalInput?.value().trim();
+      if (!name) {
+        dialog.error = "Branch name cannot be empty";
+        cx.notify();
+        return;
+      }
+      if (name.startsWith("-") || name.startsWith("/")) {
+        dialog.error = "Branch name cannot start with '-' or '/'";
+        cx.notify();
+        return;
+      }
+      if (name === dialog.oldBranch) {
+        dialog.error = "The new name must differ from the current name";
+        cx.notify();
+        return;
+      }
+      const renameIsRemote = dialog.ref?.kind === "remote";
+      if (renameIsRemote) {
+        const { remote } = splitRemoteBranch(dialog.ref?.text || "", this.remotes);
+        if (this.availableBranches.includes(`${remote}/${name}`)) {
+          dialog.error = `Remote branch '${remote}/${name}' already exists`;
+          cx.notify();
+          return;
+        }
+      } else if (this.findLocalCounterpart(name)) {
+        dialog.error = `Local branch '${name}' already exists`;
+        cx.notify();
+        return;
+      }
+      if (dialog.renameCounterpart && dialog.counterpartKind === "remote") {
+        const { remote } = splitRemoteBranch(dialog.counterpartText, this.remotes);
+        if (this.availableBranches.includes(`${remote}/${name}`)) {
+          dialog.error = `Remote branch '${remote}/${name}' already exists`;
+          cx.notify();
+          return;
+        }
+      } else if (dialog.renameCounterpart && dialog.counterpartKind === "local" && this.findLocalCounterpart(name)) {
+        dialog.error = `Local branch '${name}' already exists`;
         cx.notify();
         return;
       }
@@ -2620,6 +2728,216 @@ export default class GitGraph extends View {
           } else {
             this.closeModal(cx);
             notify({ title: "Rebase conflict/error", body: (r.stderr || r.stdout).trim(), level: "error" });
+            this.refresh(cx);
+          }
+        } else if (type === "rename-branch") {
+          const oldBranch = dialog.oldBranch;
+          const isRemote = dialog.ref?.kind === "remote";
+          /** Abbreviated upstream of a branch, or null when it has none. */
+          const upstreamOf = async (branch) => {
+            // Branch names come from Git and can never start with '-', so the
+            // revision is safe here; rev-parse would echo --end-of-options as a
+            // separate output line and corrupt the upstream comparison.
+            const r = await exec("git", ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`], {
+              cwd: root,
+              on,
+            });
+            return r.code === 0 ? r.stdout.trim() : null;
+          };
+          const warnings = [];
+          const setTrackedUpstream = async (branch, upstreamRef) => {
+            const r = await exec(
+              "git",
+              ["branch", "--set-upstream-to", upstreamRef, "--end-of-options", branch],
+              { cwd: root, on }
+            );
+            if (r.code !== 0) {
+              warnings.push((r.stderr || r.stdout).trim() || `could not set upstream to ${upstreamRef}`);
+            }
+          };
+
+          if (isRemote) {
+            // Remote branches cannot be renamed in place: push the tracked ref
+            // under the new name, delete the old one, then move the local copy.
+            const { remote, branch: remoteOld } = splitRemoteBranch(ref.text, this.remotes);
+            if (!remote || !remoteOld) {
+              fail(`Could not determine remote and branch from '${ref.text}'`);
+              return;
+            }
+            const oldRemoteText = `${remote}/${remoteOld}`;
+            const newRemoteText = `${remote}/${name}`;
+            const localName = dialog.counterpartText;
+
+            // Refresh the tracked ref first: pushing a stale view and then
+            // deleting the old branch would discard remote-only commits.
+            const refresh = await exec(
+              "git",
+              [...NETWORK, ...fetchRemoteBranchArgs(remote, remoteOld)],
+              { cwd: root, on }
+            );
+            if (refresh.code !== 0) {
+              fail(
+                `Could not refresh '${oldRemoteText}' before renaming: ${
+                  (refresh.stderr || refresh.stdout).trim() || "git fetch failed"
+                }`
+              );
+              return;
+            }
+
+            // The local branch tracks the old remote ref only while it still exists.
+            const tracksOld = localName ? (await upstreamOf(localName)) === oldRemoteText : false;
+
+            const push = await exec(
+              "git",
+              [...NETWORK, ...renameRemoteBranchPushArgs(remote, remoteOld, name)],
+              { cwd: root, on }
+            );
+            if (push.code !== 0) {
+              fail((push.stderr || push.stdout).trim() || `Failed to create '${newRemoteText}'`);
+              this.refresh(cx);
+              return;
+            }
+            const del = await exec(
+              "git",
+              [...NETWORK, ...deleteRemoteBranchArgs(remote, remoteOld)],
+              { cwd: root, on }
+            );
+            if (del.code !== 0) {
+              fail(
+                `Created '${newRemoteText}', but could not delete '${oldRemoteText}': ${
+                  (del.stderr || del.stdout).trim() || "git push --delete failed"
+                }`
+              );
+              this.refresh(cx);
+              return;
+            }
+
+            let renamedLocal = false;
+            if (localName && dialog.renameCounterpart) {
+              const r = await exec("git", ["branch", "-m", "--end-of-options", localName, name], {
+                cwd: root,
+                on,
+              });
+              if (r.code !== 0) {
+                fail(
+                  `Remote branch renamed to '${newRemoteText}', but the local branch rename failed: ${
+                    (r.stderr || r.stdout).trim() || "git branch -m failed"
+                  }`
+                );
+                this.refresh(cx);
+                return;
+              }
+              renamedLocal = true;
+              if (tracksOld) await setTrackedUpstream(name, newRemoteText);
+              if (this.branchFilter === localName) this.branchFilter = name;
+            } else if (localName && tracksOld) {
+              // Keep the local name, but follow the renamed remote branch.
+              await setTrackedUpstream(localName, newRemoteText);
+            }
+            if (this.branchFilter === oldRemoteText) this.branchFilter = newRemoteText;
+
+            this.closeModal(cx);
+            notify({
+              title: "Remote branch renamed",
+              body: `${oldRemoteText} → ${newRemoteText}${
+                renamedLocal ? ` (local '${localName}' → '${name}')` : ""
+              }`,
+              level: "success",
+            });
+            for (const warning of warnings) {
+              notify({ title: "Upstream not updated", body: warning, level: "warning" });
+            }
+            this.refresh(cx);
+          } else {
+            const pairText = dialog.counterpartText;
+            const renameRemote = Boolean(dialog.renameCounterpart && pairText);
+            let tracksOld = false;
+            let renamedRemoteText = null;
+
+            if (renameRemote) {
+              const { remote, branch: remoteOld } = splitRemoteBranch(pairText, this.remotes);
+              if (!remote || !remoteOld) {
+                fail(`Could not determine remote and branch from '${pairText}'`);
+                return;
+              }
+              // Refresh the tracked ref first: pushing a stale view and then
+              // deleting the old branch would discard remote-only commits.
+              const refresh = await exec(
+                "git",
+                [...NETWORK, ...fetchRemoteBranchArgs(remote, remoteOld)],
+                { cwd: root, on }
+              );
+              if (refresh.code !== 0) {
+                fail(
+                  `Could not refresh '${pairText}' before renaming: ${
+                    (refresh.stderr || refresh.stdout).trim() || "git fetch failed"
+                  }`
+                );
+                return;
+              }
+
+              tracksOld = (await upstreamOf(oldBranch)) === pairText;
+              renamedRemoteText = `${remote}/${name}`;
+
+              const push = await exec(
+                "git",
+                [...NETWORK, ...renameRemoteBranchPushArgs(remote, remoteOld, name)],
+                { cwd: root, on }
+              );
+              if (push.code !== 0) {
+                fail((push.stderr || push.stdout).trim() || `Failed to create '${renamedRemoteText}'`);
+                this.refresh(cx);
+                return;
+              }
+              const del = await exec(
+                "git",
+                [...NETWORK, ...deleteRemoteBranchArgs(remote, remoteOld)],
+                { cwd: root, on }
+              );
+              if (del.code !== 0) {
+                fail(
+                  `Created '${renamedRemoteText}', but could not delete '${pairText}': ${
+                    (del.stderr || del.stdout).trim() || "git push --delete failed"
+                  }`
+                );
+                this.refresh(cx);
+                return;
+              }
+            }
+
+            const r = await exec("git", ["branch", "-m", "--end-of-options", oldBranch, name], {
+              cwd: root,
+              on,
+            });
+            if (r.code !== 0) {
+              fail(
+                renamedRemoteText
+                  ? `Remote branch renamed to '${renamedRemoteText}', but the local rename failed: ${
+                      (r.stderr || r.stdout).trim() || "git branch -m failed"
+                    }`
+                  : (r.stderr || r.stdout).trim() || "Failed to rename branch"
+              );
+              if (renamedRemoteText) this.refresh(cx);
+              return;
+            }
+
+            if (renamedRemoteText && tracksOld) await setTrackedUpstream(name, renamedRemoteText);
+            if (this.branchFilter === oldBranch) this.branchFilter = name;
+            if (renamedRemoteText && this.branchFilter === pairText) {
+              this.branchFilter = renamedRemoteText;
+            }
+
+            this.closeModal(cx);
+            notify({
+              title: "Branch renamed",
+              body: `${oldBranch} → ${name}${
+                renamedRemoteText ? ` (remote ${pairText} → ${renamedRemoteText})` : ""
+              }`,
+              level: "success",
+            });
+            for (const warning of warnings) {
+              notify({ title: "Upstream not updated", body: warning, level: "warning" });
+            }
             this.refresh(cx);
           }
         } else if (type === "confirm-delete-branch") {
@@ -3064,6 +3382,7 @@ export default class GitGraph extends View {
           .child(
             div()
               .id("wt-badge")
+              .tooltip("Working Tree (WIP)")
               .px(5)
               .py(1)
               .rounded(4)
@@ -3151,6 +3470,7 @@ export default class GitGraph extends View {
           .child(
             h_flex()
               .id(`stash-badge-${item.hash}`)
+              .tooltip(item.stashRef)
               .gap(4)
               .items_center()
               .px(5)
@@ -3283,6 +3603,7 @@ export default class GitGraph extends View {
         return h_flex()
           .id(`ref-head-${commit.hash}-${idx}`)
           .w(badgeW)
+          .tooltip(badgeTooltip(ref))
           .flex_none()
           .gap(4)
           .items_center()
@@ -3313,6 +3634,7 @@ export default class GitGraph extends View {
         return h_flex()
           .id(`ref-pair-${commit.hash}-${idx}-${ref.text}`)
           .w(badgeW)
+          .tooltip(badgeTooltip(ref))
           .flex_none()
           .gap(4)
           .items_center()
@@ -3343,6 +3665,7 @@ export default class GitGraph extends View {
       return h_flex()
         .id(`ref-${ref.kind}-${commit.hash}-${idx}-${ref.text}`)
         .w(badgeW)
+        .tooltip(badgeTooltip(ref))
         .flex_none()
         .gap(4)
         .items_center()
@@ -3372,10 +3695,14 @@ export default class GitGraph extends View {
       });
       curX += extraW + 5;
 
+      const extraRefs = displayRefs.slice(2);
+      const extraTip = extraRefsTooltip(extraRefs);
+
       renderedBadges.push(
         div()
           .id(`ref-extra-${commit.hash}`)
           .w(extraW)
+          .tooltip(extraTip)
           .flex_none()
           .overflow_hidden()
           .text_center()
@@ -4109,6 +4436,7 @@ export default class GitGraph extends View {
                   const isActive = this.branchFilter === bName;
                   return h_flex()
                     .id(`branch-item-${bName}`)
+                    .tooltip(bName)
                     .flex_none()
                     .h(24)
                     .px(8)
@@ -5751,6 +6079,74 @@ export default class GitGraph extends View {
                     )
                 )
             )
+            // Rename local branch (optionally its paired remote)
+            .when(!isRemote, (e) =>
+              e.child(
+                h_flex()
+                  .id("bmenu-rename")
+                  .h(26)
+                  .px(8)
+                  .gap(6)
+                  .items_center()
+                  .rounded(5)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(color(t.hover)))
+                  .on_click((_e, cx) => this.openModal("rename-branch", { ref }, cx))
+                  .child(
+                    div()
+                      .w(14)
+                      .h(14)
+                      .flex_none()
+                      .flex()
+                      .items_center()
+                      .justify_center()
+                      .child(svg("mods/git-graph/icons/rename.svg").size(12).text_color(color(t.dim)))
+                  )
+                  .child(
+                    div()
+                      .flex_1()
+                      .min_w(0)
+                      .truncate()
+                      .child(
+                        ref.pairedRemote
+                          ? `Rename Branch '${bName}' (and remote)…`
+                          : `Rename Branch '${bName}'…`
+                      )
+                  )
+              )
+            )
+            // Rename remote branch
+            .when(isRemote, (e) =>
+              e.child(
+                h_flex()
+                  .id("bmenu-rename-remote")
+                  .h(26)
+                  .px(8)
+                  .gap(6)
+                  .items_center()
+                  .rounded(5)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(color(t.hover)))
+                  .on_click((_e, cx) => this.openModal("rename-branch", { ref }, cx))
+                  .child(
+                    div()
+                      .w(14)
+                      .h(14)
+                      .flex_none()
+                      .flex()
+                      .items_center()
+                      .justify_center()
+                      .child(svg("mods/git-graph/icons/rename.svg").size(12).text_color(color(t.dim)))
+                  )
+                  .child(
+                    div()
+                      .flex_1()
+                      .min_w(0)
+                      .truncate()
+                      .child(`Rename Remote Branch '${bName}'…`)
+                  )
+              )
+            )
             // Delete branch (local only)
             .when(!isRemote, (e) =>
               e.child(
@@ -5984,6 +6380,8 @@ export default class GitGraph extends View {
     const modelQuery = String(dialog.search || "").trim().toLowerCase();
     const shownModels = dialog.type === "clean-model" ? this.cleanVisibleModels(dialog) : [];
     const selectedBase = String(dialog.selected || "").split("#")[0];
+    const renameDraft =
+      dialog.type === "rename-branch" ? String(this.modalInput?.value() || "").trim() : "";
     // A fixed frame keeps the header, hint and buttons on screen while the
     // model list scrolls inside it, even in a short docked panel.
     const modelDialog = dialog.type === "clean-model";
@@ -6058,6 +6456,10 @@ export default class GitGraph extends View {
                           ? `Merge '${dialog.ref?.text || "branch"}' into '${this.currentBranch || "HEAD"}'`
                           : dialog.type === "confirm-rebase"
                           ? `Rebase '${this.currentBranch || "HEAD"}' on ${commit.shortHash}`
+                          : dialog.type === "rename-branch"
+                          ? dialog.ref?.kind === "remote"
+                            ? `Rename Remote Branch '${dialog.ref?.text}'`
+                            : `Rename Branch '${dialog.ref?.text}'`
                           : dialog.type === "confirm-delete-branch"
                           ? `Delete Branch '${dialog.ref?.text}'`
                           : dialog.type === "confirm-delete-remote-branch"
@@ -6133,6 +6535,14 @@ export default class GitGraph extends View {
                       ? `Merge branch '${dialog.ref?.text}' into the current branch '${this.currentBranch}'`
                       : dialog.type === "confirm-rebase"
                       ? `Rebase current branch '${this.currentBranch}' onto ${commit.shortHash}`
+                      : dialog.type === "rename-branch"
+                      ? dialog.ref?.kind === "remote"
+                        ? `Rename '${dialog.ref?.text}' on the remote: the new branch is pushed first, then the old one is deleted`
+                        : `Rename branch '${dialog.ref?.text}'${
+                            dialog.renameCounterpart && dialog.counterpartKind === "remote"
+                              ? ` and its remote branch '${dialog.counterpartText}'`
+                              : ""
+                          }`
                       : dialog.type === "confirm-delete-branch"
                       ? `Permanently delete branch '${dialog.ref?.text}'`
                       : dialog.type === "confirm-delete-remote-branch"
@@ -6142,6 +6552,25 @@ export default class GitGraph extends View {
               )
           )
           // Warnings for mutations
+          .when(
+            dialog.type === "rename-branch" &&
+              (dialog.ref?.kind === "remote" ||
+                (dialog.renameCounterpart && dialog.counterpartKind === "remote")),
+            (e) =>
+              e.child(
+                div()
+                  .p(8)
+                  .rounded(6)
+                  .bg(color(t.ansi3 + "18"))
+                  .border_1()
+                  .border_color(color(t.ansi3 + "44"))
+                  .text_size(10.5)
+                  .text_color(color(t.ansi3))
+                  .child(
+                    "⚠️ Remote branches cannot be renamed in place. The new name is pushed first, then the old remote branch is deleted; anyone tracking the old name must update their upstream."
+                  )
+              )
+          )
           .when(dialog.type === "confirm-delete-remote-branch", (e) =>
             e.child(
               div()
@@ -6483,6 +6912,86 @@ export default class GitGraph extends View {
                   .child(div().text_size(11).text_color(color(t.dim)).child("Checkout after creating"))
               )
           )
+          // Rename inputs: new name + optional counterpart toggle
+          .when(dialog.type === "rename-branch", (e) =>
+            e
+              .child(
+                Input.new(this.modalInput)
+                  .id("modal-rename-input")
+                  .h(32)
+                  .w_full()
+                  .px(8)
+                  .rounded(6)
+                  .border_1()
+                  .border_color(color(t.border))
+                  .bg(color(t.background))
+                  .text_size(12)
+                  .text_color(color(t.foreground))
+              )
+              .child(
+                div()
+                  .text_size(9.5)
+                  .text_color(color(t.muted))
+                  .child(
+                    dialog.ref?.kind === "remote"
+                      ? `New remote ref: ${splitRemoteBranch(dialog.ref?.text || "", this.remotes).remote}/${
+                          renameDraft || "…"
+                        }`
+                      : `New local branch: ${renameDraft || "…"}`
+                  )
+              )
+              .when(Boolean(dialog.counterpartText), (el) =>
+                el
+                  .child(
+                    h_flex()
+                      .id("modal-rename-counterpart-toggle")
+                      .gap(6)
+                      .items_center()
+                      .cursor_pointer()
+                      .on_click((_e, cx) => {
+                        this.modalDialog.renameCounterpart = !this.modalDialog.renameCounterpart;
+                        this.modalDialog.error = null;
+                        cx.notify();
+                      })
+                      .child(
+                        div()
+                          .size(14)
+                          .rounded(3)
+                          .border_1()
+                          .border_color(color(dialog.renameCounterpart ? t.accent : t.border))
+                          .bg(color(dialog.renameCounterpart ? t.accent : t.background))
+                          .flex()
+                          .items_center()
+                          .justify_center()
+                          .when(dialog.renameCounterpart, (inner) =>
+                            inner.child(div().size(6).rounded_full().bg(color(t.accent_foreground)))
+                          )
+                      )
+                      .child(
+                        div()
+                          .text_size(11)
+                          .text_color(color(t.dim))
+                          .child(
+                            dialog.counterpartKind === "remote"
+                              ? `Also rename remote branch '${dialog.counterpartText}'`
+                              : `Also rename local branch '${dialog.counterpartText}'`
+                          )
+                      )
+                  )
+                  .when(
+                    dialog.counterpartKind === "local" && !dialog.renameCounterpart,
+                    (note) =>
+                      note.child(
+                        div()
+                          .text_size(9.5)
+                          .text_color(color(t.muted))
+                          .child(
+                            `'${dialog.counterpartText}' keeps its name; its upstream follows the renamed remote branch if it tracked the old one.`
+                          )
+                      )
+                  )
+              )
+          )
           // Tag inputs: Name + Optional message
           .when(dialog.type === "tag", (e) =>
             e
@@ -6770,6 +7279,8 @@ export default class GitGraph extends View {
                         ? "Unstashing…"
                         : dialog.type === "drop-stash"
                         ? "Dropping…"
+                        : dialog.type === "rename-branch"
+                        ? "Renaming…"
                         : dialog.type === "confirm-delete-remote-branch"
                         ? "Deleting…"
                         : "Working…"
@@ -6813,6 +7324,10 @@ export default class GitGraph extends View {
                       ? "Delete Remote Branch"
                       : dialog.type === "confirm-delete-branch"
                       ? "Delete Branch"
+                      : dialog.type === "rename-branch"
+                      ? dialog.ref?.kind === "remote"
+                        ? "Rename Remote Branch"
+                        : "Rename Branch"
                       : "Confirm"
                   )
               )

@@ -7,6 +7,8 @@ import {
   isLayoutNodeVisible,
   parseRefs,
   resolveDisplayRefs,
+  badgeTooltip,
+  extraRefsTooltip,
   parseCommitLog,
   logArgs,
   tagArgs,
@@ -29,6 +31,8 @@ import {
   filterVisibleCleanModels,
   splitRemoteBranch,
   deleteRemoteBranchArgs,
+  fetchRemoteBranchArgs,
+  renameRemoteBranchPushArgs,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
 } from "../mods/git-graph/git-logic.js";
@@ -678,6 +682,38 @@ test("deleteRemoteBranchArgs: safely constructs git push delete arguments", () =
   ]);
 });
 
+test("fetchRemoteBranchArgs: refreshes exactly one remote-tracking ref", () => {
+  assert.deepEqual(fetchRemoteBranchArgs("origin", "main"), [
+    "fetch",
+    "origin",
+    "--end-of-options",
+    "+refs/heads/main:refs/remotes/origin/main",
+  ]);
+
+  assert.deepEqual(fetchRemoteBranchArgs("upstream", "feat/nested"), [
+    "fetch",
+    "upstream",
+    "--end-of-options",
+    "+refs/heads/feat/nested:refs/remotes/upstream/feat/nested",
+  ]);
+});
+
+test("renameRemoteBranchPushArgs: pushes the tracked ref under the new branch name", () => {
+  assert.deepEqual(renameRemoteBranchPushArgs("origin", "main", "trunk"), [
+    "push",
+    "origin",
+    "--end-of-options",
+    "refs/remotes/origin/main:refs/heads/trunk",
+  ]);
+
+  assert.deepEqual(renameRemoteBranchPushArgs("upstream", "feat/old", "feat/nested/new"), [
+    "push",
+    "upstream",
+    "--end-of-options",
+    "refs/remotes/upstream/feat/old:refs/heads/feat/nested/new",
+  ]);
+});
+
 test("resolveDisplayRefs: folds HEAD and pairs local with remote refs", () => {
   const rawRefs = [
     { kind: "head", text: "HEAD" },
@@ -802,4 +838,44 @@ test("file icons: every mapped icon ships with the mod", () => {
     assert.ok(has(icon), `missing icon: ${icon}.svg`);
   }
   assert.ok(has("folder-base"), "missing folder-base.svg");
+});
+
+test("badgeTooltip: returns full text for local, remote, paired, tag, head, and handles empty", () => {
+  assert.equal(badgeTooltip(null), "");
+  assert.equal(badgeTooltip({ kind: "head", text: "HEAD" }), "HEAD");
+  assert.equal(
+    badgeTooltip({ kind: "local", text: "feature/user-authentication-login-flow-long-branch" }),
+    "feature/user-authentication-login-flow-long-branch"
+  );
+  assert.equal(
+    badgeTooltip({
+      kind: "local",
+      text: "feature/user-auth",
+      pairedRemote: { text: "origin/feature/user-auth" },
+    }),
+    "feature/user-auth | origin/feature/user-auth"
+  );
+  assert.equal(badgeTooltip({ kind: "tag", text: "v2.5.0-rc.1-preview" }), "v2.5.0-rc.1-preview");
+  assert.equal(
+    badgeTooltip({ kind: "remote", text: "upstream/feature/something" }),
+    "upstream/feature/something"
+  );
+});
+
+test("extraRefsTooltip: joins extra refs formatted with badgeTooltip", () => {
+  assert.equal(extraRefsTooltip([]), "");
+  assert.equal(extraRefsTooltip(null), "");
+  const extra = [
+    { kind: "tag", text: "v1.0.0" },
+    {
+      kind: "local",
+      text: "feature/billing",
+      pairedRemote: { text: "origin/feature/billing" },
+    },
+    { kind: "remote", text: "origin/legacy" },
+  ];
+  assert.equal(
+    extraRefsTooltip(extra),
+    "v1.0.0, feature/billing | origin/feature/billing, origin/legacy"
+  );
 });

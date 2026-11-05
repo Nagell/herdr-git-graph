@@ -460,6 +460,30 @@ export function resolveDisplayRefs(refs) {
 }
 
 /**
+ * Computes the full text tooltip for a ref badge.
+ *
+ * @param {{ kind?: string, text?: string, pairedRemote?: { text: string } }} ref
+ * @returns {string}
+ */
+export function badgeTooltip(ref) {
+  if (!ref) return "";
+  if (ref.kind === "head") return "HEAD";
+  if (ref.pairedRemote) return `${ref.text} | ${ref.pairedRemote.text}`;
+  return ref.text || "";
+}
+
+/**
+ * Computes the tooltip for an overflow "+N" refs badge.
+ *
+ * @param {Array<{ kind?: string, text?: string, pairedRemote?: { text: string } }>} extraRefs
+ * @returns {string}
+ */
+export function extraRefsTooltip(extraRefs) {
+  if (!extraRefs || !extraRefs.length) return "";
+  return extraRefs.map(badgeTooltip).join(", ");
+}
+
+/**
  * Parses raw git log output formatted with Unit Separator (%x1f).
  *
  * @param {string} stdout
@@ -921,6 +945,40 @@ export function splitRemoteBranch(refText, remotes = []) {
  */
 export function deleteRemoteBranchArgs(remote, branch) {
   return ["push", remote, "--delete", "--end-of-options", branch];
+}
+
+/**
+ * Refreshes one remote-tracking ref before it is renamed, so a stale local view
+ * can never make the rename drop remote-only commits when the old branch is
+ * deleted.
+ *
+ * @param {string} remote
+ * @param {string} branch
+ * @returns {string[]}
+ */
+export function fetchRemoteBranchArgs(remote, branch) {
+  return [
+    "fetch",
+    remote,
+    "--end-of-options",
+    `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`,
+  ];
+}
+
+/**
+ * Builds the refspec that recreates a remote branch under a new name before
+ * the old name is deleted. Git cannot rename a remote branch in place, so the
+ * refreshed remote-tracking ref is pushed to the new name first; this preserves
+ * the remote content instead of uploading unpushed local commits.
+ *
+ * @param {string} remote
+ * @param {string} oldBranch
+ * @param {string} newBranch
+ * @returns {string[]}
+ */
+export function renameRemoteBranchPushArgs(remote, oldBranch, newBranch) {
+  const source = `refs/remotes/${remote}/${oldBranch}`;
+  return ["push", remote, "--end-of-options", `${source}:refs/heads/${newBranch}`];
 }
 
 // --- Diff syntax highlighting -------------------------------------------
