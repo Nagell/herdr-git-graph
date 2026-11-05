@@ -57,6 +57,8 @@ import {
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
+  OPENCODE_INSTALL_CMD,
+  OPENCODE_DOCS_URL,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -433,6 +435,14 @@ export default class GitGraph extends View {
     this.treeAgentStarting = false;
     this.treeAgentModel = null; // last resolved model id
     this.cleanModelsCache = null; // { at, root, on, models } from `opencode models`
+    this.opencodeInstalled = props()?.noOpencode ? false : null; // boolean | null when unknown
+    this.installingOpencode = false;
+
+    if (props()?.openModelPicker) {
+      cx.timer.after(300, (cx) => {
+        this.openCleanAgentModelPicker(cx);
+      });
+    }
 
     this.handle = cx.focus_handle();
 
@@ -2291,6 +2301,10 @@ export default class GitGraph extends View {
 
     // Choosing a model is a local preference change, not a git mutation.
     if (type === "clean-model") {
+      if (dialog.opencodeInstalled === false) {
+        this.installOpencode(cx);
+        return;
+      }
       const chosen = dialog.selected;
       if (!chosen) {
         dialog.error = "Choose a model first";
@@ -4268,6 +4282,93 @@ export default class GitGraph extends View {
   }
 
   /**
+   * Checks whether the `opencode` CLI binary is installed and executable.
+   *
+   * @param {string} root
+   * @param {string | null} on
+   * @returns {Promise<boolean>}
+   */
+  async checkOpencodeInstalled(root, on) {
+    try {
+      const r = await exec("opencode", ["--version"], { cwd: root, on });
+      return r.code === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Installs OpenCode via CLI using the official installer from https://opencode.ai/docs/.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
+   */
+  installOpencode(cx) {
+    const location = this.getLocation();
+    const root = this.root || location.cwd;
+    const on = this.on ?? location.on;
+
+    if (this.installingOpencode) return;
+    this.installingOpencode = true;
+    if (this.modalDialog?.type === "clean-model") {
+      this.modalDialog.installing = true;
+      this.modalDialog.error = null;
+    }
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        notify({
+          title: "Installing OpenCode CLI",
+          body: `Running ${OPENCODE_INSTALL_CMD}…`,
+          level: "info",
+        });
+
+        const r = await exec("bash", ["-c", OPENCODE_INSTALL_CMD], { cwd: root, on });
+        if (r.code !== 0) {
+          const detail = (r.stderr || r.stdout).trim() || `Installer exited with code ${r.code}`;
+          throw new Error(detail);
+        }
+
+        const verified = await this.checkOpencodeInstalled(root, on);
+        this.opencodeInstalled = verified;
+
+        notify({
+          title: "OpenCode installed successfully",
+          body: "OpenCode CLI is now ready to use.",
+          level: "success",
+        });
+
+        this.cleanModelsCache = null;
+        const models = await this.loadCleanAgentModels(root, on, { force: true });
+
+        if (this.modalDialog?.type === "clean-model") {
+          this.modalDialog.opencodeInstalled = verified;
+          this.modalDialog.installing = false;
+          this.modalDialog.models = models;
+          this.modalDialog.error = null;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (this.modalDialog?.type === "clean-model") {
+          this.modalDialog.installing = false;
+          this.modalDialog.error = `CLI installation failed: ${msg.slice(0, 300)}`;
+        }
+        notify({
+          title: "Could not install OpenCode",
+          body: msg.length > 500 ? `${msg.slice(0, 500)}…` : msg,
+          level: "error",
+        });
+      } finally {
+        this.installingOpencode = false;
+        if (this.modalDialog?.type === "clean-model") {
+          this.modalDialog.installing = false;
+        }
+        cx.notify();
+      }
+    });
+  }
+
+  /**
    * Every model `opencode models` reports, with free ones first. When the
    * catalog cannot be read, the known free preference still gives the picker
    * something useful to show.
@@ -4281,20 +4382,31 @@ export default class GitGraph extends View {
       cache.on === on &&
       Date.now() - cache.at < 60000
     ) {
+      this.opencodeInstalled = cache.installed;
       return cache.models;
     }
     let ids = [];
-    try {
-      const r = await exec("opencode", ["models"], { cwd: root, on });
-      if (r.code === 0) {
-        ids = r.stdout
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean);
+    let installed = false;
+    if (props()?.noOpencode) {
+      installed = false;
+    } else {
+      try {
+        const r = await exec("opencode", ["models"], { cwd: root, on });
+        if (r.code === 0) {
+          installed = true;
+          ids = r.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean);
+        }
+      } catch {
+        // Fall through to version check.
       }
-    } catch {
-      // Fall through to the known free list.
+      if (!installed) {
+        installed = await this.checkOpencodeInstalled(root, on);
+      }
     }
+    this.opencodeInstalled = installed;
     if (!ids.length) {
       ids = CLEAN_AGENT_MODEL_PREFERENCE.map((id) => id.split("#")[0]);
       const saved = this.treeAgentModel || shared(CLEAN_AGENT_MODEL_KEY);
@@ -4316,7 +4428,7 @@ export default class GitGraph extends View {
           (a.free && b.free ? cleanModelRank(a.id) - cleanModelRank(b.id) : 0) ||
           a.id.localeCompare(b.id)
       );
-    this.cleanModelsCache = { at: Date.now(), root, on, models };
+    this.cleanModelsCache = { at: Date.now(), root, on, models, installed };
     return models;
   }
 
@@ -4431,6 +4543,178 @@ export default class GitGraph extends View {
   }
 
   /**
+   * Prominent card rendered when OpenCode CLI is not found on the machine.
+   * Offers direct CLI installation via `curl | bash` or running the installer
+   * in a Herdr terminal tab, plus command copying and docs reference.
+   */
+  renderOpencodeInstallCard(dialog, t, cx) {
+    const isInstalling = Boolean(this.installingOpencode || dialog.installing);
+    return v_flex()
+      .id("opencode-install-card")
+      .flex_none()
+      .gap(8)
+      .p(10)
+      .rounded(6)
+      .bg(color(t.ansi3 + "14"))
+      .border_1()
+      .border_color(color(t.ansi3 + "40"))
+      .child(
+        h_flex()
+          .items_center()
+          .justify_between()
+          .gap(8)
+          .child(
+            h_flex()
+              .items_center()
+              .gap(6)
+              .child(svg("mods/git-graph/icons/opencode.svg").size(14).text_color(color(t.ansi3)))
+              .child(
+                div()
+                  .font_semibold()
+                  .text_size(12)
+                  .text_color(color(t.foreground))
+                  .child("OpenCode CLI not found")
+              )
+          )
+          .child(
+            div()
+              .text_size(10)
+              .text_color(color(t.muted))
+              .cursor_pointer()
+              .hover((s) => s.text_color(color(t.foreground)))
+              .tooltip(`Open ${OPENCODE_DOCS_URL}`)
+              .on_click((_e, cx) => {
+                cx.write_to_clipboard(OPENCODE_DOCS_URL);
+                notify({
+                  title: "URL copied",
+                  body: OPENCODE_DOCS_URL,
+                  level: "success",
+                  timeout: 2000,
+                });
+                exec("open", [OPENCODE_DOCS_URL]).catch(() => {});
+              })
+              .child("opencode.ai/docs ↗")
+          )
+      )
+      .child(
+        div()
+          .text_size(11)
+          .text_color(color(t.foreground))
+          .child(
+            "OpenCode is required for the AI commit worker. Install it using the official CLI installer:"
+          )
+      )
+      .child(
+        h_flex()
+          .id("opencode-install-cmd-box")
+          .w_full()
+          .items_center()
+          .justify_between()
+          .gap(6)
+          .px(8)
+          .py(5)
+          .rounded(4)
+          .bg(color(t.background))
+          .border_1()
+          .border_color(color(t.border))
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .font_family(String(settings().font_family ?? "JetBrains Mono"))
+              .text_size(10.5)
+              .text_color(color(t.foreground))
+              .tooltip(OPENCODE_INSTALL_CMD)
+              .child(OPENCODE_INSTALL_CMD)
+          )
+          .child(
+            div()
+              .id("opencode-copy-cmd-btn")
+              .flex_none()
+              .px(6)
+              .py(2)
+              .rounded(3)
+              .bg(color(t.hover))
+              .cursor_pointer()
+              .hover((s) => s.bg(color(t.border)))
+              .tooltip("Copy command to clipboard")
+              .on_click((_e, cx) => {
+                cx.write_to_clipboard(OPENCODE_INSTALL_CMD);
+                notify({
+                  title: "Command copied",
+                  body: OPENCODE_INSTALL_CMD,
+                  level: "success",
+                  timeout: 2000,
+                });
+              })
+              .child(
+                h_flex()
+                  .gap(4)
+                  .items_center()
+                  .child(svg("mods/git-graph/icons/copy.svg").size(11).text_color(color(t.muted)))
+                  .child(div().text_size(10).text_color(color(t.muted)).child("Copy"))
+              )
+          )
+      )
+      .child(
+        h_flex()
+          .gap(8)
+          .items_center()
+          .child(
+            div()
+              .id("opencode-install-cli-btn")
+              .px(10)
+              .py(5)
+              .rounded(4)
+              .bg(color(t.accent))
+              .text_color(color(t.accent_foreground))
+              .text_size(11)
+              .font_semibold()
+              .when(!isInstalling, (b) => b.cursor_pointer().hover((s) => s.opacity(0.9)))
+              .when(isInstalling, (b) => b.opacity(0.6).cursor_not_allowed())
+              .tooltip("Install OpenCode using curl | bash via CLI")
+              .on_click((_e, cx) => {
+                if (isInstalling) return;
+                this.installOpencode(cx);
+              })
+              .child(isInstalling ? "Installing OpenCode…" : "Install OpenCode")
+          )
+          .child(
+            div()
+              .id("opencode-check-btn")
+              .px(8)
+              .py(5)
+              .rounded(4)
+              .border_1()
+              .border_color(color(t.border))
+              .bg(color(t.background))
+              .text_color(color(t.muted))
+              .text_size(11)
+              .cursor_pointer()
+              .hover((s) => s.bg(color(t.hover)).text_color(color(t.foreground)))
+              .tooltip("Check if OpenCode is now installed")
+              .on_click((_e, cx) => {
+                const root = this.root || this.getLocation().cwd;
+                const on = this.on ?? this.getLocation().on;
+                dialog.loading = true;
+                cx.notify();
+                cx.spawn(async (cx) => {
+                  this.cleanModelsCache = null;
+                  const models = await this.loadCleanAgentModels(root, on, { force: true });
+                  if (this.modalDialog !== dialog) return;
+                  dialog.models = models;
+                  dialog.opencodeInstalled = Boolean(this.opencodeInstalled);
+                  dialog.loading = false;
+                  cx.notify();
+                });
+              })
+              .child("Check again")
+          )
+      );
+  }
+
+  /**
    * Opens a model picker for the AI worker. It is used both as an explicit
    * choice (right-click the toolbar button or the branch-menu entry) and as
    * the recovery path when the preferred model cannot start.
@@ -4453,6 +4737,8 @@ export default class GitGraph extends View {
       showAll: false,
       loading: true,
       error,
+      opencodeInstalled: this.opencodeInstalled,
+      installing: this.installingOpencode,
     };
     this.modalDialog = dialog;
     this.modalInput = searchInput;
@@ -4477,6 +4763,7 @@ export default class GitGraph extends View {
     cx.spawn(async (cx) => {
       const models = await this.loadCleanAgentModels(root, on, { force: true });
       if (this.modalDialog !== dialog) return;
+      dialog.opencodeInstalled = Boolean(this.opencodeInstalled);
       dialog.models = models;
       const activeModel = this.resolveCleanAgentModel(models, currentModel);
       dialog.activeModel = activeModel;
@@ -4556,6 +4843,21 @@ export default class GitGraph extends View {
           agent.failed = true;
           agent.busy = false;
           agent.idleSince = agent.idleSince || Date.now();
+          try {
+            const mRes = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}/message`], {
+              cwd: agent.root,
+              on: agent.on,
+            });
+            if (mRes.code === 0) {
+              const mData = JSON.parse(mRes.stdout);
+              const list = Array.isArray(mData?.data) ? mData.data : Array.isArray(mData) ? mData : [];
+              const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
+              if (errEntry?.error) {
+                agent.errorMessage = errEntry.error.message || errEntry.error.type;
+                agent.errorType = errEntry.error.type;
+              }
+            }
+          } catch {}
         } else if (busy) {
           agent.sawBusy = true;
           agent.idleSince = null;
@@ -4615,14 +4917,43 @@ export default class GitGraph extends View {
             this.treeAgent = null;
             this.treeAgentStarting = false;
             this.closeTreeAgentTab(agent);
+
+            if (!agent.errorMessage && agent.sessionId) {
+              try {
+                const mRes = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}/message`], {
+                  cwd: agent.root,
+                  on: agent.on,
+                });
+                if (mRes.code === 0) {
+                  const mData = JSON.parse(mRes.stdout);
+                  const list = Array.isArray(mData?.data) ? mData.data : Array.isArray(mData) ? mData : [];
+                  const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
+                  if (errEntry?.error) {
+                    agent.errorMessage = errEntry.error.message || errEntry.error.type;
+                    agent.errorType = errEntry.error.type;
+                  }
+                }
+              } catch {}
+            }
+
+            const isLimit =
+              agent.errorType === "provider.free-limit" ||
+              /limit|quota|rate\s*limit|429/i.test(agent.errorMessage || "");
+            const title = isLimit ? "AI usage limit reached" : "AI commit worker stopped";
+            const detail = agent.errorMessage
+              ? agent.errorMessage
+              : !live
+              ? "The worker terminal exited before commits were completed."
+              : "The AI model stopped before the tree was clean.";
+
             notify({
-              title: "AI commit worker stopped",
-              body: "The working tree still has changes. Choose a model to try again.",
+              title,
+              body: `${detail.slice(0, 300)} · Choose another model to continue.`,
               level: "error",
             });
             this.openCleanAgentModelPicker(
               cx,
-              "The AI model stopped before the tree was clean. Choose another model to retry."
+              `${isLimit ? "⚠️ Usage limit reached: " : ""}${detail}\n\nChoose another model to retry.`
             );
             cx.notify();
           }
@@ -4766,6 +5097,18 @@ export default class GitGraph extends View {
         const headBefore = headRes.code === 0 ? headRes.stdout.trim() : null;
 
         const models = await this.loadCleanAgentModels(root, on);
+        if (this.opencodeInstalled === false) {
+          notify({
+            title: "OpenCode CLI not found",
+            body: "Install OpenCode to use the AI commit worker.",
+            level: "warning",
+          });
+          this.openCleanAgentModelPicker(
+            cx,
+            "OpenCode CLI is not installed. Install OpenCode to clean the working tree."
+          );
+          return;
+        }
         const model = this.resolveCleanAgentModel(models, requestedModel);
         if (!model) {
           notify({
@@ -4870,6 +5213,8 @@ export default class GitGraph extends View {
       tip = "Check out a branch before cleaning the tree";
     } else if (clean) {
       tip = "Working tree is clean";
+    } else if (this.opencodeInstalled === false) {
+      tip = `Clean tree with ${CLEAN_AGENT_LABEL} (OpenCode CLI not found · click to install)`;
     } else if (this.inProgressOp) {
       tip = `Resolve the ${this.inProgressOp.type} and commit with ${CLEAN_AGENT_LABEL} (${model}, no push)`;
     } else {
@@ -4900,6 +5245,10 @@ export default class GitGraph extends View {
       .on_click((_e, cx) => {
         if (busy && this.treeAgent?.address) {
           run("terminal.peek", { terminal: this.treeAgent.address });
+          return;
+        }
+        if (this.opencodeInstalled === false) {
+          this.openCleanAgentModelPicker(cx);
           return;
         }
         this.startTreeAgent(cx);
@@ -5639,6 +5988,9 @@ export default class GitGraph extends View {
                 .flex_1()
                 .min_h(0)
                 .gap(6)
+                .when(!dialog.loading && dialog.opencodeInstalled === false, (el) =>
+                  el.child(this.renderOpencodeInstallCard(dialog, t, cx))
+                )
                 .when(!dialog.loading, (el) => el.child(this.cleanProviderTabs(dialog, t, cx)))
                 .child(
                   h_flex()
@@ -6145,6 +6497,9 @@ export default class GitGraph extends View {
                   .text_size(11)
                   .font_semibold()
                   .when(dialog.type === "clean-model", (el) => {
+                    if (dialog.opencodeInstalled === false) {
+                      return el.tooltip("Install OpenCode via CLI (curl -fsSL https://opencode.ai/install | bash)");
+                    }
                     const chosen = dialog.selected || dialog.activeModel;
                     const clean = !this.workingTreeFiles.length && !this.inProgressOp;
                     return el.tooltip(
@@ -6155,8 +6510,10 @@ export default class GitGraph extends View {
                   })
                   .on_click((_e, cx) => this.submitModal(cx))
                   .child(
-                    this.busy
-                      ? dialog.type === "publish"
+                    this.busy || this.installingOpencode || dialog.installing
+                      ? dialog.type === "clean-model" && dialog.opencodeInstalled === false
+                        ? "Installing OpenCode…"
+                        : dialog.type === "publish"
                         ? "Publishing…"
                         : dialog.type === "stash"
                         ? "Stashing…"
@@ -6166,7 +6523,9 @@ export default class GitGraph extends View {
                         ? "Dropping…"
                         : "Working…"
                       : dialog.type === "clean-model"
-                      ? (!this.workingTreeFiles.length && !this.inProgressOp
+                      ? dialog.opencodeInstalled === false
+                        ? "Install OpenCode"
+                        : (!this.workingTreeFiles.length && !this.inProgressOp
                           ? "Save model"
                           : dialogWidth >= 340
                           ? `Start agent (${cleanModelLabel(dialog.selected || dialog.activeModel)})`
