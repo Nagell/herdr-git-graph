@@ -37,7 +37,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - A missing or unauthenticated GitHub CLI reports what to install or run instead of disabling Push.
   - Fetch disables without a remote; Pull needs an upstream, Push needs a commit on a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.
 - **Background AI Commit Worker**:
-  - A one-click sparkles AI button beside the branch controls (also available from the branch dropdown when dirty) starts **OpenCode Mini** in a background Herdr terminal.
+  - A one-click sparkles AI button beside the branch controls (also available from the branch dropdown when dirty) starts **OpenCode Mini** in a background Herdr terminal. While the worker starts or runs, the sparkles glyph turns into a native spinning arc, so the toolbar shows that the cleanup is in progress.
   - It always picks the best available free model — DeepSeek V4.1 Flash Free by default, then other free `opencode models` entries — and receives the current branch, dirty paths, and any in-progress operation in its first message.
   - Right-click the AI button (or use **AI commit model…** in the branch dropdown) to choose a model from a scrollable, searchable picker with provider tabs. If no free model can start or the worker stops before finishing, the picker opens automatically.
   - The agent resolves merge/rebase/cherry-pick/revert conflicts, completes the operation, and turns the remaining changes into atomic Conventional Commits using the `git-change-workflow` skill.
