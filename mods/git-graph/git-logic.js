@@ -122,6 +122,198 @@ export function isLightColor(value) {
 }
 
 /**
+ * Icons by exact file name (Git, lock and tool files), keyed by lowercase name.
+ * Values are icon names from Material Icon Theme; the SVGs live in `icons/`.
+ */
+export const FILE_ICON_BY_NAME = {
+  ".gitattributes": "git",
+  ".gitignore": "git",
+  ".gitkeep": "git",
+  ".gitmodules": "git",
+  "bun.lockb": "bun",
+  "cargo.lock": "lock",
+  "gemfile.lock": "ruby",
+  "go.sum": "go-mod",
+  dockerfile: "docker",
+  ".dockerignore": "docker",
+  makefile: "makefile",
+  "package-lock.json": "nodejs",
+  "pnpm-lock.yaml": "pnpm",
+  "poetry.lock": "poetry",
+  "yarn.lock": "yarn",
+};
+
+/**
+ * Icons by lowercase extension, without the dot. Values are icon names from
+ * Material Icon Theme; the SVGs live in `icons/`.
+ */
+export const FILE_ICON_BY_EXT = {
+  "7z": "zip",
+  a: "lib",
+  avi: "video",
+  avif: "image",
+  bash: "console",
+  bat: "console",
+  bin: "hex",
+  bmp: "image",
+  bz2: "zip",
+  c: "c",
+  cc: "cpp",
+  cer: "certificate",
+  cfg: "settings",
+  cjs: "javascript",
+  class: "javaclass",
+  clj: "clojure",
+  cmd: "console",
+  conf: "settings",
+  config: "settings",
+  cpp: "cpp",
+  crt: "certificate",
+  cs: "csharp",
+  css: "css",
+  csv: "table",
+  cxx: "cpp",
+  dart: "dart",
+  db: "database",
+  dll: "dll",
+  doc: "word",
+  docx: "word",
+  dylib: "dll",
+  editorconfig: "settings",
+  erl: "erlang",
+  ex: "elixir",
+  exe: "exe",
+  exs: "elixir",
+  fish: "console",
+  flac: "audio",
+  gif: "image",
+  go: "go",
+  gz: "zip",
+  h: "h",
+  hpp: "hpp",
+  hs: "haskell",
+  htm: "html",
+  html: "html",
+  ico: "image",
+  ini: "settings",
+  jar: "jar",
+  java: "java",
+  jpeg: "image",
+  jpg: "image",
+  js: "javascript",
+  json: "json",
+  jsonc: "json",
+  jsx: "react",
+  key: "key",
+  kt: "kotlin",
+  kts: "kotlin",
+  less: "less",
+  lock: "lock",
+  log: "log",
+  lua: "lua",
+  m4a: "audio",
+  markdown: "markdown",
+  md: "markdown",
+  mdx: "mdx",
+  mjs: "javascript",
+  mkv: "video",
+  mov: "video",
+  mp3: "audio",
+  mp4: "video",
+  o: "exe",
+  odt: "word",
+  ogg: "audio",
+  pages: "document",
+  pdf: "pdf",
+  pem: "key",
+  php: "php",
+  pl: "prolog",
+  png: "image",
+  properties: "settings",
+  ps1: "powershell",
+  py: "python",
+  pyc: "python-misc",
+  r: "r",
+  rar: "zip",
+  rb: "ruby",
+  rs: "rust",
+  rst: "markdown",
+  rtf: "word",
+  sass: "sass",
+  scala: "scala",
+  scss: "sass",
+  sh: "console",
+  so: "dll",
+  sql: "database",
+  sqlite: "database",
+  sqlite3: "database",
+  styl: "stylus",
+  svelte: "svelte",
+  svg: "svg",
+  swift: "swift",
+  tar: "zip",
+  text: "document",
+  tgz: "zip",
+  tif: "image",
+  tiff: "image",
+  toml: "toml",
+  ts: "typescript",
+  tsv: "table",
+  tsx: "react_ts",
+  txt: "document",
+  vue: "vue",
+  wasm: "webassembly",
+  wav: "audio",
+  webm: "video",
+  webp: "image",
+  xhtml: "html",
+  xls: "table",
+  xlsx: "table",
+  xml: "xml",
+  xz: "zip",
+  yaml: "yaml",
+  yml: "yaml",
+  zig: "zig",
+  zip: "zip",
+  zsh: "console",
+};
+
+/** Icons that have a light-background variant (`<name>_light.svg`). */
+const FILE_ICON_LIGHT = new Set(["bun", "pnpm", "toml"]);
+
+/** Generic icon for files whose type is unknown. */
+export const FILE_ICON_DEFAULT = "document";
+
+/** Folder icon, relative to the Herdr app folder. */
+export const FOLDER_ICON_PATH = "mods/git-graph/icons/folder-base.svg";
+
+/**
+ * Chooses the icon for a file by its name: exact names first (Git and lock files,
+ * `.env` variants), then the extension. Unknown files get the generic icon. On a
+ * light background the `_light` variant is used when the icon provides one.
+ *
+ * @param {string} fileName Base name only.
+ * @param {boolean} [light=false] True when the theme background is light.
+ * @returns {string} Path to the SVG, relative to the Herdr app folder.
+ */
+export function fileIconPath(fileName, light = false) {
+  const name = typeof fileName === "string" ? fileName : "";
+  const lower = name.toLowerCase();
+  let icon = FILE_ICON_DEFAULT;
+  if (lower === ".env" || lower.startsWith(".env.")) {
+    icon = "tune";
+  } else if (FILE_ICON_BY_NAME[lower]) {
+    icon = FILE_ICON_BY_NAME[lower];
+  } else {
+    const dot = lower.lastIndexOf(".");
+    const ext = dot > 0 ? lower.slice(dot + 1) : "";
+    if (FILE_ICON_BY_EXT[ext]) icon = FILE_ICON_BY_EXT[ext];
+  }
+  const variant = light && FILE_ICON_LIGHT.has(icon) ? `${icon}_light` : icon;
+  return `mods/git-graph/icons/${variant}.svg`;
+}
+
+/**
  * Parses decorated ref strings produced by `git log --decorate=full --format=%D`.
  * Correctly distinguishes local branches with slashes (e.g. refs/heads/feat/foo)
  * from remote branches (refs/remotes/origin/...) and filters out symbolic refs (origin/HEAD).

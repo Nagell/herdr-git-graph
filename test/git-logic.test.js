@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   computeEffectiveRoot,
   isLayoutNodeVisible,
@@ -17,6 +19,11 @@ import {
   wrapSplitRows,
   isFreeModel,
   isLightColor,
+  fileIconPath,
+  FILE_ICON_BY_NAME,
+  FILE_ICON_BY_EXT,
+  FILE_ICON_DEFAULT,
+  FOLDER_ICON_PATH,
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
@@ -745,4 +752,54 @@ test("parseCommitLog: parses unit-separated git log lines into rich commit objec
   // Empty input returns empty array
   assert.deepEqual(parseCommitLog(""), []);
   assert.deepEqual(parseCommitLog(null), []);
+});
+
+test("fileIconPath: matches the file editor's Material Icon Theme pattern", () => {
+  // Exact names win over the extension, case-insensitively.
+  assert.equal(fileIconPath("Dockerfile"), "mods/git-graph/icons/docker.svg");
+  assert.equal(fileIconPath(".gitignore"), "mods/git-graph/icons/git.svg");
+  assert.equal(fileIconPath("package-lock.json"), "mods/git-graph/icons/nodejs.svg");
+  assert.equal(fileIconPath("yarn.lock"), "mods/git-graph/icons/yarn.svg");
+
+  // Extensions, including paths and uppercase names.
+  assert.equal(fileIconPath("src/app.ts"), "mods/git-graph/icons/typescript.svg");
+  assert.equal(fileIconPath("App.TSX"), "mods/git-graph/icons/react_ts.svg");
+  assert.equal(fileIconPath("styles.scss"), "mods/git-graph/icons/sass.svg");
+  assert.equal(fileIconPath("README.md"), "mods/git-graph/icons/markdown.svg");
+
+  // `.env` variants use the tune icon, and unknown files fall back to the document icon.
+  assert.equal(fileIconPath(".env"), "mods/git-graph/icons/tune.svg");
+  assert.equal(fileIconPath(".env.local"), "mods/git-graph/icons/tune.svg");
+  assert.equal(fileIconPath("mystery.qqq"), `mods/git-graph/icons/${FILE_ICON_DEFAULT}.svg`);
+  assert.equal(fileIconPath("LICENSE"), `mods/git-graph/icons/${FILE_ICON_DEFAULT}.svg`);
+  assert.equal(fileIconPath(""), `mods/git-graph/icons/${FILE_ICON_DEFAULT}.svg`);
+
+  // Light backgrounds pick the `_light` variant only when the icon provides one.
+  assert.equal(fileIconPath("Cargo.toml", true), "mods/git-graph/icons/toml_light.svg");
+  assert.equal(fileIconPath("pnpm-lock.yaml", true), "mods/git-graph/icons/pnpm_light.svg");
+  assert.equal(fileIconPath("bun.lockb", true), "mods/git-graph/icons/bun_light.svg");
+  assert.equal(fileIconPath("src/app.ts", true), "mods/git-graph/icons/typescript.svg");
+
+  // Folders use the shared folder icon.
+  assert.equal(FOLDER_ICON_PATH, "mods/git-graph/icons/folder-base.svg");
+});
+
+test("file icons: every mapped icon ships with the mod", () => {
+  const iconsDir = new URL("../mods/git-graph/icons/", import.meta.url);
+  const has = (name) => existsSync(fileURLToPath(new URL(`${name}.svg`, iconsDir)));
+
+  for (const [name, icon] of Object.entries(FILE_ICON_BY_NAME)) {
+    assert.ok(has(icon), `missing icon for ${name}: ${icon}.svg`);
+  }
+  for (const [ext, icon] of Object.entries(FILE_ICON_BY_EXT)) {
+    assert.ok(has(icon), `missing icon for .${ext}: ${icon}.svg`);
+  }
+  for (const icon of ["bun", "pnpm", "toml"]) {
+    assert.ok(has(icon), `missing icon: ${icon}.svg`);
+    assert.ok(has(`${icon}_light`), `missing light icon: ${icon}_light.svg`);
+  }
+  for (const icon of [FILE_ICON_DEFAULT, "tune"]) {
+    assert.ok(has(icon), `missing icon: ${icon}.svg`);
+  }
+  assert.ok(has("folder-base"), "missing folder-base.svg");
 });

@@ -2,7 +2,7 @@
 // A visual Git graph viewer with topological branch lanes, commit history,
 // working tree inspection, hierarchical file tree, and interactive diff viewer.
 
-import { View, div, svg, uniform_list, PathBuilder } from "gpui-kit";
+import { View, div, svg, image, uniform_list, PathBuilder } from "gpui-kit";
 import {
   v_flex,
   h_flex,
@@ -58,6 +58,8 @@ import {
   isLayoutNodeVisible,
   isFreeModel,
   isLightColor,
+  fileIconPath,
+  FOLDER_ICON_PATH,
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
@@ -171,86 +173,6 @@ function cleanProviderIcon(id) {
 
 /** @param {any} c @returns {`#${string}`} */
 const color = (c) => /** @type {`#${string}`} */ (c);
-
-/**
- * VS Code-like language badge for a changed file: a small colored square with
- * a short label. Unknown extensions return null and get the generic file icon.
- * @param {string} name
- */
-function fileTypeBadge(name) {
-  const base = String(name || "").toLowerCase();
-  const ext = base.includes(".") ? base.split(".").pop() : "";
-  const special = {
-    dockerfile: ["DK", "#2496ed", "#ffffff"],
-    makefile: ["MK", "#6d8086", "#ffffff"],
-    ".gitignore": ["GI", "#f14e32", "#ffffff"],
-    ".env": ["E", "#ecd53f", "#1e1e1e"],
-    ".editorconfig": ["EC", "#6d8086", "#ffffff"],
-  };
-  const types = {
-    js: ["JS", "#f1e05a", "#1e1e1e"],
-    mjs: ["JS", "#f1e05a", "#1e1e1e"],
-    cjs: ["JS", "#f1e05a", "#1e1e1e"],
-    jsx: ["JS", "#f1e05a", "#1e1e1e"],
-    ts: ["TS", "#3178c6", "#ffffff"],
-    mts: ["TS", "#3178c6", "#ffffff"],
-    cts: ["TS", "#3178c6", "#ffffff"],
-    tsx: ["TS", "#3178c6", "#ffffff"],
-    css: ["#", "#2965f1", "#ffffff"],
-    scss: ["#", "#c6538c", "#ffffff"],
-    sass: ["#", "#c6538c", "#ffffff"],
-    less: ["#", "#1d365d", "#ffffff"],
-    html: ["<>", "#e44d26", "#ffffff"],
-    htm: ["<>", "#e44d26", "#ffffff"],
-    vue: ["V", "#41b883", "#1e1e1e"],
-    svelte: ["S", "#ff3e00", "#ffffff"],
-    json: ["{}", "#cbcb41", "#1e1e1e"],
-    jsonc: ["{}", "#cbcb41", "#1e1e1e"],
-    md: ["M", "#519aba", "#ffffff"],
-    mdx: ["M", "#519aba", "#ffffff"],
-    py: ["Py", "#3572a5", "#ffffff"],
-    rs: ["R", "#dea584", "#1e1e1e"],
-    go: ["GO", "#00add8", "#1e1e1e"],
-    sh: [">_", "#89e051", "#1e1e1e"],
-    bash: [">_", "#89e051", "#1e1e1e"],
-    zsh: [">_", "#89e051", "#1e1e1e"],
-    fish: [">_", "#89e051", "#1e1e1e"],
-    yml: ["Y", "#cb171e", "#ffffff"],
-    yaml: ["Y", "#cb171e", "#ffffff"],
-    toml: ["T", "#9c4221", "#ffffff"],
-    ini: ["T", "#9c4221", "#ffffff"],
-    conf: ["T", "#9c4221", "#ffffff"],
-    lock: ["L", "#f0b400", "#1e1e1e"],
-    svg: ["I", "#a074c4", "#ffffff"],
-    png: ["I", "#a074c4", "#ffffff"],
-    jpg: ["I", "#a074c4", "#ffffff"],
-    jpeg: ["I", "#a074c4", "#ffffff"],
-    gif: ["I", "#a074c4", "#ffffff"],
-    webp: ["I", "#a074c4", "#ffffff"],
-    ico: ["I", "#a074c4", "#ffffff"],
-    pdf: ["P", "#b30b00", "#ffffff"],
-    sql: ["DB", "#e38c00", "#ffffff"],
-    java: ["J", "#b07219", "#ffffff"],
-    c: ["C", "#555555", "#ffffff"],
-    h: ["C", "#555555", "#ffffff"],
-    cpp: ["C", "#f34b7d", "#ffffff"],
-    cc: ["C", "#f34b7d", "#ffffff"],
-    cxx: ["C", "#f34b7d", "#ffffff"],
-    hpp: ["C", "#f34b7d", "#ffffff"],
-    cs: ["C#", "#178600", "#ffffff"],
-    php: ["P", "#777bb4", "#ffffff"],
-    rb: ["RB", "#cc342d", "#ffffff"],
-    swift: ["S", "#f05138", "#ffffff"],
-    kt: ["K", "#a97bff", "#ffffff"],
-    kts: ["K", "#a97bff", "#ffffff"],
-    dart: ["D", "#00b4ab", "#ffffff"],
-    lua: ["L", "#000080", "#ffffff"],
-    r: ["R", "#198ce7", "#ffffff"],
-    xml: ["<>", "#e37933", "#ffffff"],
-  };
-  const hit = special[base] || types[ext];
-  return hit ? { label: hit[0], bg: hit[1], fg: hit[2] } : null;
-}
 
 /** Human label for a porcelain status code. */
 function statusLabel(status) {
@@ -1131,7 +1053,7 @@ export default class GitGraph extends View {
           .bg(color(t.chrome))
           .border_b(1)
           .border_color(color(t.border))
-          .child(svg("mods/git-graph/icons/file.svg").size(14).flex_none().text_color(color(t.muted)))
+          .child(image(fileIconPath(base, isLightColor(t.background))).size(14).flex_none())
           .child(div().font_semibold().text_size(12.5).truncate().child(base))
           .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(color(t.dim)).child(dir))
           .when(this.diffAdd > 0, (e) =>
@@ -3587,7 +3509,7 @@ export default class GitGraph extends View {
   /** One VS Code-style folder or file row in the changes tree. */
   renderTreeRow(row, t, cx) {
     const isFileSelected = !row.isDir && this.selectedFile === row.path;
-    const badge = row.isDir ? null : fileTypeBadge(row.name);
+    const iconPath = row.isDir ? FOLDER_ICON_PATH : fileIconPath(row.name, isLightColor(t.background));
     const status = row.status || "M";
     const tip = row.isDir
       ? `${row.path}\n${row.add} added · ${row.del} removed\nClick to ${row.isExpanded ? "collapse" : "expand"}`
@@ -3629,28 +3551,8 @@ export default class GitGraph extends View {
                 .text_color(color(t.dim))
             )
           )
-          .when(!row.isDir, (e) =>
-            e.child(
-              badge
-                ? div()
-                    .w(16)
-                    .h(16)
-                    .rounded(3)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(color(badge.bg))
-                    .child(
-                      div()
-                        .text_size(8)
-                        .font_semibold()
-                        .text_color(color(badge.fg))
-                        .child(badge.label)
-                    )
-                : svg("mods/git-graph/icons/file.svg").size(12).text_color(color(t.muted))
-            )
-          )
       )
+      .child(image(iconPath).size(14).flex_none())
       .child(
         div()
           .flex_1()
