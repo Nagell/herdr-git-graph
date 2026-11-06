@@ -841,7 +841,28 @@ export function computeLanes(commits) {
 }
 
 /**
+ * Moves a node aside when a commit both removes a file and adds entries under
+ * the same path (or the other way around). Git paths cannot contain NUL, so a
+ * NUL-prefixed key can never collide with a real name and both rows stay in
+ * the tree.
+ */
+function parkNode(children, key, node) {
+  children.delete(key);
+  let parkedKey = `\0${node.path}`;
+  let suffix = 1;
+  while (children.has(parkedKey)) {
+    parkedKey = `\0${node.path}\0${suffix++}`;
+  }
+  children.set(parkedKey, node);
+}
+
+/**
  * Builds a hierarchical tree from a flat list of files with changed paths.
+ *
+ * A single commit can report both a file and paths below it: replacing a
+ * directory with a symlink shows the new `foo` file next to the removed
+ * `foo/bar` file. Both entries are kept instead of assuming the first one is a
+ * directory.
  */
 export function buildFileTree(files) {
   const root = { isDir: true, path: "", name: "", children: new Map(), add: 0, del: 0 };
@@ -852,22 +873,35 @@ export function buildFileTree(files) {
     for (let i = 0; i < parts.length - 1; i++) {
       const part = parts[i];
       const dirPath = parts.slice(0, i + 1).join("/");
-      if (!current.children.has(part)) {
-        current.children.set(part, {
+      let dirNode = current.children.get(part);
+      if (dirNode && !dirNode.isDir) {
+        // A file already occupies this name; keep it visible and descend into
+        // a directory node instead.
+        parkNode(current.children, part, dirNode);
+        dirNode = null;
+      }
+      if (!dirNode) {
+        dirNode = {
           isDir: true,
           path: dirPath,
           name: part,
           children: new Map(),
           add: 0,
           del: 0,
-        });
+        };
+        current.children.set(part, dirNode);
       }
-      const dirNode = current.children.get(part);
       dirNode.add += file.add || 0;
       dirNode.del += file.del || 0;
       current = dirNode;
     }
     const fileName = parts[parts.length - 1];
+    const existing = current.children.get(fileName);
+    if (existing?.isDir) {
+      // A directory already occupies this name; keep its contents and show the
+      // file as a sibling row with the same display path.
+      parkNode(current.children, fileName, existing);
+    }
     current.children.set(fileName, {
       isDir: false,
       path: file.path,

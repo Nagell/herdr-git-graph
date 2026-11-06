@@ -13,6 +13,8 @@ import {
   logArgs,
   tagArgs,
   computeLanes,
+  buildFileTree,
+  flattenFileTree,
   buildDiffView,
   intraLineDiff,
   diffRows,
@@ -346,6 +348,44 @@ test("computeLanes: side branch parent does not reuse merge commit lane or flip 
   assert.ok(fixConn);
   assert.equal(fixConn.toLane, 2);
   assert.equal(commits[2].colorIdx, fixConn.colorIdx);
+});
+
+test("buildFileTree: a file replacing a directory keeps both the file and the nested files", () => {
+  const files = [
+    { path: "skills/computer-use", status: "A", add: 1, del: 0 },
+    { path: "skills/computer-use/SKILL.md", status: "D", add: 0, del: 46 },
+  ];
+  const rows = flattenFileTree(buildFileTree(files), 0, new Set(), []);
+
+  assert.deepEqual(
+    rows.map((row) => [row.isDir, row.path]),
+    [
+      [true, "skills"],
+      [true, "skills/computer-use"],
+      [false, "skills/computer-use/SKILL.md"],
+      [false, "skills/computer-use"],
+    ]
+  );
+  assert.equal(rows[3].file.status, "A", "the symlink row keeps its own diff and status");
+  assert.equal(rows[3].add, 1);
+});
+
+test("buildFileTree: a directory added after a file with the same name keeps both branches", () => {
+  const files = [
+    { path: "foo/bar.txt", status: "A", add: 3, del: 0 },
+    { path: "foo", status: "D", add: 0, del: 2 },
+  ];
+  const rows = flattenFileTree(buildFileTree(files), 0, new Set(), []);
+
+  assert.deepEqual(
+    rows.map((row) => [row.isDir, row.path]),
+    [
+      [true, "foo"],
+      [false, "foo/bar.txt"],
+      [false, "foo"],
+    ]
+  );
+  assert.equal(rows[2].file.status, "D");
 });
 
 test("buildDiffView: left and right columns have equal length for unbalanced hunk", () => {
