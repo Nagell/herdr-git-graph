@@ -1987,11 +1987,52 @@ function sliceRanges(changes, start, end) {
 }
 
 /**
+ * Whether `text` is ASCII, where a UTF-16 index and a code-point index are the
+ * same. Diff text is almost always ASCII, and taking this fast path keeps the
+ * renderer from building two throwaway arrays for every visible cell.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isAsciiText(text) {
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 127) return false;
+  }
+  return true;
+}
+
+/**
+ * Whitespace a wrapped line may break on. ASCII is the common case and avoids a
+ * Unicode regular expression in the wrap loop; anything above ASCII still gets
+ * the full `\s` check.
+ *
+ * @param {string} ch one code point
+ * @returns {boolean}
+ */
+function isWrapSpace(ch) {
+  const code = ch.charCodeAt(0);
+  // ASCII space, tab, LF, VT, FF, and CR are the whitespace `\s` matches in the
+  // common case. Everything above ASCII still gets the Unicode check.
+  return (
+    code === 32 ||
+    code === 9 ||
+    code === 10 ||
+    code === 11 ||
+    code === 12 ||
+    code === 13 ||
+    (code > 127 && SPACE_CHAR.test(ch))
+  );
+}
+
+/**
  * The code-point index where a chunk starting at `start` should end. It takes
  * `limit` characters, then backs up to the last space in the second half so a
  * word stays whole when the line has one; unbreakable runs still hard-wrap.
  *
- * @param {string[]} chars
+ * `chars` is a string on the ASCII fast path and an array of code points when
+ * the cell contains non-ASCII text.
+ *
+ * @param {string | string[]} chars
  * @param {number} start
  * @param {number} limit
  * @returns {number}
@@ -2002,7 +2043,7 @@ function wrapBreak(chars, start, limit) {
 
   const floor = start + Math.max(1, Math.floor(limit / 2));
   for (let i = end; i > floor; i--) {
-    if (SPACE_CHAR.test(chars[i - 1])) return i;
+    if (isWrapSpace(chars[i - 1])) return i;
   }
   return end;
 }
@@ -2023,8 +2064,12 @@ function wrapCellChunks(cell, columns) {
 
   if (!text) return [{ text: "", spans: [], changes: [] }];
 
-  const chars = Array.from(text);
-  const offsets = codePointOffsets(chars);
+  // ASCII cells are their own code-point arrays. Non-ASCII cells (arrows,
+  // box drawings, emoji) keep the UTF-16 offsets so surrogate pairs survive.
+  const ascii = isAsciiText(text);
+  const chars = ascii ? text : Array.from(text);
+  const offsets = ascii ? null : codePointOffsets(chars);
+  const charLength = chars.length;
   /** @type {Array<{ text: string, spans: Array<{ text: string, kind: string }>, changes: Array<[number, number]> }>} */
   const chunks = [];
 
@@ -2033,10 +2078,10 @@ function wrapCellChunks(cell, columns) {
   let spanIndex = 0;
   let spanStart = 0;
 
-  for (let charIndex = 0; charIndex < chars.length; ) {
-    const endIndex = wrapBreak(chars, charIndex, limit);
-    const start = offsets[charIndex];
-    const end = offsets[endIndex];
+  for (let charIndex = 0; charIndex < charLength; ) {
+    const endIndex = Math.max(charIndex + 1, wrapBreak(chars, charIndex, limit));
+    const start = ascii ? charIndex : offsets[charIndex];
+    const end = ascii ? endIndex : offsets[endIndex];
 
     while (spanIndex < spans.length && spanStart + spans[spanIndex].text.length <= start) {
       spanStart += spans[spanIndex].text.length;
@@ -2056,7 +2101,7 @@ function wrapCellChunks(cell, columns) {
       index++;
     }
 
-    const chunkText = chars.slice(charIndex, endIndex).join("");
+    const chunkText = ascii ? text.slice(charIndex, endIndex) : chars.slice(charIndex, endIndex).join("");
     if (!parts.length && chunkText) parts.push({ kind: "plain", text: chunkText });
 
     chunks.push({ text: chunkText, spans: parts, changes: sliceRanges(changes, start, end) });

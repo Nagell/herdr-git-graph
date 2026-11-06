@@ -534,6 +534,39 @@ test("wrapInlineRows: counts code points so emoji are never split", () => {
   assert.equal(rows.map((r) => r.text).join(""), "a😀bcdef");
 });
 
+test("wrapInlineRows: keeps spans and change ranges on non-ASCII lines", () => {
+  const row = {
+    kind: "+",
+    newNum: 4,
+    text: "áéíóú alpha",
+    spans: [
+      { text: "áéíóú ", kind: "string" },
+      { text: "alpha", kind: "plain" },
+    ],
+    changes: [[0, 5]],
+  };
+
+  const rows = wrapInlineRows([row], 6);
+
+  assert.deepEqual(
+    rows.map((r) => r.text),
+    ["áéíóú ", "alpha"]
+  );
+  assert.deepEqual(rows[0].spans, [{ text: "áéíóú ", kind: "string" }]);
+  assert.deepEqual(rows[0].changes, [[0, 5]]);
+  assert.deepEqual(rows[1].changes, []);
+});
+
+test("wrapInlineRows: wraps a long ASCII line into complete chunks", () => {
+  const text = "a".repeat(5000);
+  const rows = wrapInlineRows([{ kind: "+", newNum: 1, text }], 100);
+
+  assert.equal(rows.length, 50);
+  assert.equal(rows.map((r) => r.text).join(""), text);
+  assert.equal(rows[0].newNum, 1);
+  assert.equal(rows[49].newNum, null);
+});
+
 test("wrapInlineRows: leaves a short diff untouched", () => {
   const row = { kind: " ", oldNum: 1, newNum: 2, text: "short" };
   const rows = wrapInlineRows([row], 80);
