@@ -2,7 +2,7 @@
   "name": "git-graph",
   "version": "0.1.0",
   "title": "Git Graph",
-  "description": "Visual Git graph viewer with branch lanes, commit history, working tree inspection, and interactive diff viewer",
+  "description": "Visual Git graph with branch lanes, commit history, working-tree inspection, stash rows, and diff tabs",
   "place": "none",
   "focusable": true
 }
