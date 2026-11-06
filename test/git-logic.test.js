@@ -12,6 +12,12 @@ import {
   parseCommitLog,
   logArgs,
   tagArgs,
+  deleteTagArgs,
+  pushTagArgs,
+  deleteRemoteTagArgs,
+  lsRemoteTagArgs,
+  remoteTagExists,
+  parseRemoteTags,
   computeLanes,
   buildFileTree,
   flattenFileTree,
@@ -234,6 +240,78 @@ test("tagArgs: protects tag name after --end-of-options with and without message
     "-v1.0",
     "abc1234",
   ]);
+
+  // Renaming an annotated tag with an empty message must keep it annotated.
+  assert.deepEqual(tagArgs("v2", "", "abc1234", { annotated: true }), [
+    "tag",
+    "-a",
+    "-m",
+    "",
+    "--end-of-options",
+    "v2",
+    "abc1234",
+  ]);
+});
+
+test("deleteTagArgs: removes one local tag after --end-of-options", () => {
+  assert.deepEqual(deleteTagArgs("-v1.0"), ["tag", "-d", "--end-of-options", "-v1.0"]);
+  assert.deepEqual(deleteTagArgs("release/2.0"), ["tag", "-d", "--end-of-options", "release/2.0"]);
+});
+
+test("tag remote helpers: publish, delete, and inspect exact refs only", () => {
+  assert.deepEqual(pushTagArgs("origin", "v1.0"), [
+    "push",
+    "origin",
+    "--end-of-options",
+    "refs/tags/v1.0:refs/tags/v1.0",
+  ]);
+
+  assert.deepEqual(deleteRemoteTagArgs("upstream", "release/2.0"), [
+    "push",
+    "upstream",
+    "--delete",
+    "--end-of-options",
+    "refs/tags/release/2.0",
+  ]);
+
+  assert.deepEqual(lsRemoteTagArgs("origin", "v1.0"), [
+    "ls-remote",
+    "--tags",
+    "--refs",
+    "origin",
+    "refs/tags/v1.0",
+  ]);
+});
+
+test("remoteTagExists: matches the full tag ref and never a prefix or peeled companion", () => {
+  const stdout = [
+    "abc123\trefs/tags/v1",
+    "def456\trefs/tags/v1.0",
+    "987fed\trefs/tags/feature/v1",
+  ].join("\n");
+
+  assert.equal(remoteTagExists(stdout, "v1"), true);
+  assert.equal(remoteTagExists(stdout, "v1.0"), true);
+  assert.equal(remoteTagExists(stdout, "feature/v1"), true);
+  assert.equal(remoteTagExists(stdout, "v"), false);
+  assert.equal(remoteTagExists("abc123\trefs/tags/v1^{}\n", "v1"), false);
+  assert.equal(remoteTagExists("", "v1"), false);
+  assert.equal(remoteTagExists(null, "v1"), false);
+});
+
+test("parseRemoteTags: lists unique tag names and ignores peeled refs", () => {
+  const stdout = [
+    "abc123\trefs/tags/v1",
+    "def456\trefs/tags/v1.0",
+    "987fed\trefs/tags/feature/v1",
+    "aaa111\trefs/tags/v1^{}",
+    "bbb222\trefs/heads/main",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(parseRemoteTags(stdout), ["v1", "v1.0", "feature/v1"]);
+  assert.deepEqual(parseRemoteTags(""), []);
+  assert.deepEqual(parseRemoteTags(null), []);
 });
 
 test("computeLanes: linear history uses one lane", () => {

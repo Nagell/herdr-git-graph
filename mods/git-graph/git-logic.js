@@ -1028,13 +1028,97 @@ export function diffRows(text) {
 
 /**
  * Builds safe arguments for git tag.
- * Ensures --end-of-options precedes the user-provided name.
+ * Ensures --end-of-options precedes the user-provided name. `annotated` lets a
+ * rename keep an annotated tag annotated even when its message is empty.
  */
-export function tagArgs(name, msg, hash) {
-  if (msg) {
-    return ["tag", "-a", "-m", msg, "--end-of-options", name, hash];
+export function tagArgs(name, msg, hash, { annotated = Boolean(msg) } = {}) {
+  if (annotated) {
+    return ["tag", "-a", "-m", msg ?? "", "--end-of-options", name, hash];
   }
   return ["tag", "--end-of-options", name, hash];
+}
+
+/**
+ * Builds safe arguments for deleting a local tag. Remote tags are untouched.
+ *
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function deleteTagArgs(name) {
+  return ["tag", "-d", "--end-of-options", name];
+}
+
+/**
+ * Builds the refspec that publishes one local tag without allowing a forced
+ * update of a different remote tag with the same name.
+ *
+ * @param {string} remote
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function pushTagArgs(remote, name) {
+  const ref = `refs/tags/${name}`;
+  return ["push", remote, "--end-of-options", `${ref}:${ref}`];
+}
+
+/**
+ * Builds safe arguments for deleting one tag from a remote.
+ *
+ * @param {string} remote
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function deleteRemoteTagArgs(remote, name) {
+  return ["push", remote, "--delete", "--end-of-options", `refs/tags/${name}`];
+}
+
+/**
+ * Builds arguments that ask one remote for exactly one tag. `--refs` hides the
+ * peeled `^{}` companion of annotated tags.
+ *
+ * @param {string} remote
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function lsRemoteTagArgs(remote, name) {
+  return ["ls-remote", "--tags", "--refs", remote, `refs/tags/${name}`];
+}
+
+/**
+ * Lists the tag names in `git ls-remote --tags --refs` output.
+ *
+ * @param {string | null | undefined} stdout
+ * @returns {string[]}
+ */
+export function parseRemoteTags(stdout) {
+  const names = new Set();
+  for (const line of String(stdout ?? "").split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2 || !parts[1].startsWith("refs/tags/") || parts[1].endsWith("^{}")) {
+      continue;
+    }
+    names.add(parts[1].slice("refs/tags/".length));
+  }
+  return [...names];
+}
+
+/**
+ * Reports whether `git ls-remote --tags --refs` output contains the exact tag.
+ *
+ * @param {string | null | undefined} stdout
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function remoteTagExists(stdout, name) {
+  const wanted = `refs/tags/${name}`;
+  return String(stdout ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => {
+      if (!line) return false;
+      const parts = line.split(/\s+/);
+      return parts.length >= 2 && parts[1] === wanted;
+    });
 }
 
 /**

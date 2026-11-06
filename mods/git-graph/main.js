@@ -50,6 +50,12 @@ import {
   buildFileTree,
   flattenFileTree,
   tagArgs,
+  deleteTagArgs,
+  pushTagArgs,
+  deleteRemoteTagArgs,
+  lsRemoteTagArgs,
+  remoteTagExists,
+  parseRemoteTags,
   logArgs,
   diffRows,
   highlightRows,
@@ -367,6 +373,7 @@ export default class GitGraph extends View {
     this.maxLane = 0;
     this.loading = false;
     this.pendingRefresh = false;
+    this.pendingRemoteTags = false;
     this.busy = false;
     this.error = null;
     this.root = this.diffMode && typeof p.folder === "string" && p.folder ? p.folder : null;
@@ -406,6 +413,14 @@ export default class GitGraph extends View {
     this.behind = 0;
     this.detached = false;
     this.remoteAction = null; // "fetch" | "pull" | "push" while one is running
+
+    // Remote tag presence for the tag badges (`v1 | origin`). This costs a
+    // network round trip, so it is cached per repository + remote set and only
+    // refreshed on load, manual refresh, and successful remote actions.
+    this.remoteTagMap = new Map(); // tag name -> Set of remotes
+    this.remoteTagsSignature = null;
+    this.remoteTagsLoading = null;
+    this.remoteTagsToken = null;
 
     // Background AI commit worker, independent per checkout. The terminal it
     // runs in is closed as soon as its commits land and the tree is clean.
@@ -1569,7 +1584,9 @@ export default class GitGraph extends View {
         this.loading = false;
         if (this.pendingRefresh) {
           this.pendingRefresh = false;
-          this.refresh(cx);
+          const remoteTags = this.pendingRemoteTags;
+          this.pendingRemoteTags = false;
+          this.refresh(cx, { remoteTags });
         } else {
           cx.notify();
         }
@@ -1577,9 +1594,10 @@ export default class GitGraph extends View {
     });
   }
 
-  refresh(cx) {
+  refresh(cx, options = {}) {
     if (this.loading) {
       this.pendingRefresh = true;
+      if (options.remoteTags) this.pendingRemoteTags = true;
       return;
     }
     const { cwd, on } = this.getLocation();
@@ -1613,6 +1631,10 @@ export default class GitGraph extends View {
           this.stashes = [];
           this.stashNodes = [];
           this.stagedCount = 0;
+          this.remoteTagMap = new Map();
+          this.remoteTagsSignature = null;
+          this.remoteTagsLoading = null;
+          this.remoteTagsToken = null;
           return;
         }
         const root = top.stdout.trim();
@@ -1638,6 +1660,10 @@ export default class GitGraph extends View {
           this.stashes = [];
           this.stashNodes = [];
           this.stagedCount = 0;
+          this.remoteTagMap = new Map();
+          this.remoteTagsSignature = null;
+          this.remoteTagsLoading = null;
+          this.remoteTagsToken = null;
           this.commitDetailsCache.clear();
           this.checkouts = [];
           cx.notify();
@@ -1847,6 +1873,7 @@ export default class GitGraph extends View {
         this.error = logError;
         this.applyFilter();
         this.maintainSelection(cx);
+        this.loadRemoteTagMap(cx, { force: Boolean(options.remoteTags) });
 
         const p = props();
         const preview = p?.preview;
@@ -1930,7 +1957,9 @@ export default class GitGraph extends View {
         this.loading = false;
         if (this.pendingRefresh) {
           this.pendingRefresh = false;
-          this.refresh(cx);
+          const remoteTags = this.pendingRemoteTags;
+          this.pendingRemoteTags = false;
+          this.refresh(cx, { remoteTags });
         } else {
           cx.notify();
         }
@@ -2109,6 +2138,9 @@ export default class GitGraph extends View {
           ...(ok ? { timeout: 2000 } : {}),
         });
         this.refresh(cx);
+        if (ok && (kind === "fetch" || kind === "pull")) {
+          this.loadRemoteTagMap(cx, { force: true });
+        }
         cx.notify();
       }
     });
@@ -2443,6 +2475,178 @@ export default class GitGraph extends View {
     cx.notify();
   }
 
+  /** Right-click menu for a tag badge: publish, rename, delete, or copy. */
+  openTagContextMenu(ref, e, cx, overrideX, overrideY) {
+    const tag = typeof ref === "string" ? { kind: "tag", text: ref } : { ...ref, kind: "tag" };
+    const menuWidth = 240;
+    const menuHeight = 180;
+    const origin = this.rootOrigin;
+    const b = /** @type {any} */ (this.rootBounds);
+    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
+    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
+
+    const maxW = this.width || b?.width || 600;
+    const maxH = this.height || b?.height || 600;
+    if (x + menuWidth > maxW) {
+      x = Math.max(10, maxW - menuWidth - 10);
+    }
+    if (y + menuHeight > maxH) {
+      y = Math.max(10, maxH - menuHeight - 10);
+    }
+    this.contextMenu = { type: "tag", ref: tag, x, y };
+    cx.notify();
+  }
+
+  /** Cache key for the remote tag map: repository, machine, and remote set. */
+  remoteTagsKey() {
+    return `${this.root || ""}|${this.on || ""}|${this.remotes.slice().sort().join(",")}`;
+  }
+
+  /** Remotes that currently have a tag, from the cached remote tag map. */
+  tagRemotes(name) {
+    const set = this.remoteTagMap.get(name);
+    return set ? [...set] : [];
+  }
+
+  /** Short remote label shown inside a tag badge; origin wins when present. */
+  tagRemoteLabel(name) {
+    const remotes = this.tagRemotes(name);
+    if (!remotes.length) return "";
+    return remotes.includes("origin") ? "origin" : remotes[0];
+  }
+
+  /** Updates one cached tag/remote pair after a publish or remote delete. */
+  rememberRemoteTag(name, remote, present = true, cx = null) {
+    const set = new Set(this.remoteTagMap.get(name) || []);
+    if (present) set.add(remote);
+    else set.delete(remote);
+    if (set.size) this.remoteTagMap.set(name, set);
+    else this.remoteTagMap.delete(name);
+    if (cx) cx.notify();
+  }
+
+  /**
+   * Reads tag names from every remote once per repository/remote set. It never
+   * runs on the 10s Git poll: manual refresh and successful fetch/pull actions
+   * force a new round trip, while publish/delete update the cache in place.
+   *
+   * @param {import("./gpui-kit.js").ViewContext} cx
+   * @param {{ force?: boolean }} [options]
+   */
+  loadRemoteTagMap(cx, { force = false } = {}) {
+    if (!this.root || !this.remotes.length) {
+      this.remoteTagsToken = null;
+      this.remoteTagsLoading = null;
+      this.remoteTagsSignature = null;
+      if (this.remoteTagMap.size) {
+        this.remoteTagMap = new Map();
+        cx.notify();
+      }
+      return;
+    }
+    const signature = this.remoteTagsKey();
+    if (!force && (this.remoteTagsSignature === signature || this.remoteTagsLoading === signature)) return;
+    const root = this.root;
+    const on = this.on;
+    const remotes = this.remotes.slice();
+    const token = Symbol("remote-tags");
+    if (this.remoteTagsSignature !== signature) this.remoteTagMap = new Map();
+    this.remoteTagsToken = token;
+    this.remoteTagsLoading = signature;
+    cx.spawn(async (cx) => {
+      const map = new Map();
+      let successes = 0;
+      await Promise.all(
+        remotes.map(async (remote) => {
+          try {
+            const r = await exec("git", [...NETWORK, "ls-remote", "--tags", "--refs", remote], {
+              cwd: root,
+              on,
+            });
+            if (r.code !== 0) return;
+            successes++;
+            for (const tag of parseRemoteTags(r.stdout)) {
+              if (!map.has(tag)) map.set(tag, new Set());
+              map.get(tag).add(remote);
+            }
+          } catch {
+            // An unreachable remote simply contributes no tag badges.
+          }
+        })
+      );
+      if (this.remoteTagsToken !== token) return;
+      this.remoteTagsToken = null;
+      this.remoteTagsLoading = null;
+      if (this.remoteTagsKey() !== signature) return;
+      // Keep the last good map when every remote check failed; a temporary
+      // network error must not erase the origin labels the person already saw.
+      if (successes > 0 || !this.remoteTagMap.size) this.remoteTagMap = map;
+      this.remoteTagsSignature = signature;
+      cx.notify();
+    });
+  }
+
+  /**
+   * Resolves where a tag currently exists before the delete dialog offers its
+   * targets. Remote checks run in parallel; a failed remote is reported without
+   * blocking deletion of the local tag.
+   *
+   * @param {any} dialog
+   * @param {import("./gpui-kit.js").ViewContext} cx
+   */
+  loadTagDeleteTargets(dialog, cx) {
+    const root = this.root;
+    const on = this.on;
+    const tagName = dialog.tag;
+    const remotes = this.remotes.slice();
+    if (!root || !tagName) {
+      dialog.checking = false;
+      dialog.error = "No tag selected";
+      return;
+    }
+    cx.spawn(async (cx) => {
+      const localRes = await exec("git", ["show-ref", "--verify", "--quiet", `refs/tags/${tagName}`], {
+        cwd: root,
+        on,
+      });
+      const results = await Promise.all(
+        remotes.map(async (remote) => {
+          try {
+            const r = await exec("git", [...NETWORK, ...lsRemoteTagArgs(remote, tagName)], { cwd: root, on });
+            if (r.code !== 0) {
+              return {
+                name: remote,
+                exists: false,
+                error:
+                  (r.stderr || r.stdout).trim() || `git ls-remote exited with code ${r.code}`,
+              };
+            }
+            return { name: remote, exists: remoteTagExists(r.stdout, tagName), error: null };
+          } catch (err) {
+            return {
+              name: remote,
+              exists: false,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        })
+      );
+      if (this.modalDialog !== dialog) return;
+      dialog.local = localRes.code === 0;
+      dialog.remotes = results;
+      dialog.availableRemotes = results.filter((r) => r.exists).map((r) => r.name);
+      dialog.remote = dialog.availableRemotes.includes(dialog.remote)
+        ? dialog.remote
+        : dialog.availableRemotes[0] || this.pushRemote() || remotes[0] || null;
+      dialog.target = dialog.local ? "local" : dialog.availableRemotes.length ? "remote" : null;
+      dialog.checking = false;
+      if (!dialog.local && !dialog.availableRemotes.length) {
+        dialog.error = `Tag '${tagName}' is no longer present locally or on the checked remotes`;
+      }
+      cx.notify();
+    });
+  }
+
   /** Right-click menu for a saved stash row. */
   openStashContextMenu(stash, e, cx, overrideX, overrideY) {
     const menuWidth = 240;
@@ -2607,6 +2811,24 @@ export default class GitGraph extends View {
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
+    } else if (type === "rename-tag") {
+      const ref = target?.ref || target;
+      const oldTag = ref?.text || "";
+      this.modalDialog = {
+        type,
+        ref: { kind: "tag", text: oldTag },
+        oldTag,
+        error: null,
+      };
+      this.modalInput = InputState.new({ placeholder: "New tag name", value: oldTag });
+      this.modalInput.on("change", (_e, cx) => {
+        if (this.modalDialog?.error) {
+          this.modalDialog.error = null;
+        }
+        cx.notify();
+      });
+      this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
+      this.focusModalInput(cx);
     } else if (type === "rename-branch") {
       const ref = target?.ref || target;
       const isRemote = ref?.kind === "remote";
@@ -2640,6 +2862,34 @@ export default class GitGraph extends View {
     } else if (type === "confirm-merge-branch" || type === "confirm-delete-remote-branch") {
       this.modalDialog = { type, ref: target?.ref || target, error: null };
       this.modalInput = null;
+    } else if (type === "push-tag") {
+      const ref = target?.ref || target;
+      const tag = ref?.text || "";
+      this.modalDialog = {
+        type,
+        ref: { kind: "tag", text: tag },
+        tag,
+        remote: this.pushRemote(),
+        error: null,
+      };
+      this.modalInput = null;
+    } else if (type === "delete-tag") {
+      const ref = target?.ref || target;
+      const tag = ref?.text || "";
+      this.modalDialog = {
+        type,
+        ref: { kind: "tag", text: tag },
+        tag,
+        local: true,
+        remotes: [],
+        availableRemotes: [],
+        remote: this.pushRemote(),
+        target: "local",
+        checking: this.remotes.length > 0,
+        error: null,
+      };
+      this.modalInput = null;
+      if (this.remotes.length) this.loadTagDeleteTargets(this.modalDialog, cx);
     } else if (type === "confirm-delete-worktree-branch") {
       // Keeps the checkout path so confirm can remove that worktree.
       this.modalDialog = {
@@ -2703,6 +2953,9 @@ export default class GitGraph extends View {
       }
       return;
     }
+
+    // The delete dialog is still discovering remote copies; nothing to submit.
+    if (type === "delete-tag" && dialog.checking) return;
 
     // The handler's Context is valid only until it returns, so the name is
     // read and checked synchronously; everything after the first await runs
@@ -2771,6 +3024,24 @@ export default class GitGraph extends View {
         return;
       }
     }
+    if (type === "rename-tag") {
+      name = this.modalInput?.value().trim();
+      if (!name) {
+        dialog.error = "Tag name cannot be empty";
+        cx.notify();
+        return;
+      }
+      if (name.startsWith("-") || name.startsWith("/")) {
+        dialog.error = "Tag name cannot start with '-' or '/'";
+        cx.notify();
+        return;
+      }
+      if (name === dialog.oldTag) {
+        dialog.error = "The new name must differ from the current name";
+        cx.notify();
+        return;
+      }
+    }
     if (type === "stash") {
       stashMessage = this.modalInput?.value().trim() || "";
       if (dialog.stashStaged && this.stagedCount === 0) {
@@ -2832,6 +3103,159 @@ export default class GitGraph extends View {
           } else {
             fail((r.stderr || r.stdout).trim() || "Failed to add tag");
           }
+        } else if (type === "rename-tag") {
+          const oldTag = dialog.oldTag;
+          const val = await exec("git", ["check-ref-format", `refs/tags/${name}`], { cwd: root, on });
+          if (val.code !== 0) {
+            fail(`'${name}' is not a valid tag name`);
+            return;
+          }
+          const exists = await exec("git", ["show-ref", "--verify", "--quiet", `refs/tags/${name}`], {
+            cwd: root,
+            on,
+          });
+          if (exists.code === 0) {
+            fail(`Tag '${name}' already exists`);
+            return;
+          }
+          const target = await exec("git", ["rev-parse", "--verify", `refs/tags/${oldTag}^{commit}`], {
+            cwd: root,
+            on,
+          });
+          if (target.code !== 0) {
+            fail(`Tag '${oldTag}' no longer exists or does not point to a commit`);
+            return;
+          }
+          const hash = target.stdout.trim();
+          const kind = await exec("git", ["cat-file", "-t", `refs/tags/${oldTag}`], { cwd: root, on });
+          const annotated = kind.code === 0 && kind.stdout.trim() === "tag";
+          let message = "";
+          if (annotated) {
+            const msg = await exec("git", ["for-each-ref", "--format=%(contents)", `refs/tags/${oldTag}`], {
+              cwd: root,
+              on,
+            });
+            if (msg.code !== 0) {
+              fail((msg.stderr || msg.stdout).trim() || `Could not read the message of '${oldTag}'`);
+              return;
+            }
+            message = msg.stdout.replace(/\n$/, "");
+          }
+          const create = await exec("git", [...NON_INTERACTIVE, ...tagArgs(name, message, hash, { annotated })], {
+            cwd: root,
+            on,
+          });
+          if (create.code !== 0) {
+            fail((create.stderr || create.stdout).trim() || `Failed to create '${name}'`);
+            return;
+          }
+          const del = await exec("git", [...NON_INTERACTIVE, ...deleteTagArgs(oldTag)], { cwd: root, on });
+          if (del.code !== 0) {
+            fail(
+              `Created '${name}', but could not delete '${oldTag}': ${
+                (del.stderr || del.stdout).trim() || "git tag -d failed"
+              }`
+            );
+            this.refresh(cx);
+            return;
+          }
+          this.closeModal(cx);
+          notify({ title: "Tag renamed", body: `Renamed '${oldTag}' to '${name}'`, level: "success" });
+          this.refresh(cx);
+        } else if (type === "push-tag") {
+          const tagName = dialog.tag;
+          const remote = dialog.remote || this.pushRemote();
+          if (!tagName) {
+            fail("No tag selected");
+            return;
+          }
+          if (!remote) {
+            fail("No remote configured");
+            return;
+          }
+          const exists = await exec("git", ["show-ref", "--verify", "--quiet", `refs/tags/${tagName}`], {
+            cwd: root,
+            on,
+          });
+          if (exists.code !== 0) {
+            fail(`Tag '${tagName}' no longer exists locally`);
+            return;
+          }
+          const r = await exec("git", [...NETWORK, ...pushTagArgs(remote, tagName)], { cwd: root, on });
+          if (r.code === 0) {
+            this.rememberRemoteTag(tagName, remote, true, cx);
+            this.closeModal(cx);
+            notify({
+              title: "Tag published",
+              body: `Pushed tag '${tagName}' to ${remote}`,
+              level: "success",
+            });
+            this.refresh(cx);
+          } else {
+            fail((r.stderr || r.stdout).trim() || `Could not push tag '${tagName}' to ${remote}`);
+          }
+        } else if (type === "delete-tag") {
+          const tagName = dialog.tag;
+          const target = dialog.target;
+          const remote = dialog.remote;
+          if (!tagName) {
+            fail("No tag selected");
+            return;
+          }
+          if (!target) {
+            fail("Choose where to delete the tag");
+            return;
+          }
+
+          let deletedLocal = false;
+          if (target === "local" || target === "both") {
+            const del = await exec("git", [...NON_INTERACTIVE, ...deleteTagArgs(tagName)], { cwd: root, on });
+            if (del.code !== 0) {
+              fail((del.stderr || del.stdout).trim() || `Failed to delete local tag '${tagName}'`);
+              return;
+            }
+            deletedLocal = true;
+          }
+
+          let deletedRemote = false;
+          if (target === "remote" || target === "both") {
+            if (!remote) {
+              fail("No remote selected");
+              if (deletedLocal) this.refresh(cx);
+              return;
+            }
+            const del = await exec("git", [...NETWORK, ...deleteRemoteTagArgs(remote, tagName)], {
+              cwd: root,
+              on,
+            });
+            if (del.code !== 0) {
+              const why = (del.stderr || del.stdout).trim() || "git push --delete failed";
+              fail(
+                deletedLocal
+                  ? `Deleted local tag '${tagName}', but could not delete it from '${remote}': ${why}`
+                  : why
+              );
+              if (deletedLocal) this.refresh(cx);
+              return;
+            }
+            deletedRemote = true;
+          }
+
+          this.closeModal(cx);
+          if (deletedLocal) this.remoteTagMap.delete(tagName);
+          else if (deletedRemote) this.rememberRemoteTag(tagName, remote, false, cx);
+          notify({
+            title: "Tag deleted",
+            body:
+              deletedLocal && deletedRemote
+                ? `Deleted '${tagName}' locally and from ${remote}`
+                : deletedRemote
+                  ? `Deleted '${tagName}' from ${remote}`
+                  : `Deleted local tag '${tagName}'`,
+            level: "success",
+          });
+          if (this.searchQuery === tagName.toLowerCase()) this.clearSearch(cx);
+          this.refresh(cx);
         } else if (type === "publish") {
           const visibility = dialog.visibility === "public" ? "--public" : "--private";
           const create = await exec(
@@ -3455,7 +3879,7 @@ export default class GitGraph extends View {
     if (this.modalDialog) return;
 
     if (e.key === "r" && !this.typing) {
-      this.refresh(cx);
+      this.refresh(cx, { remoteTags: true });
       return;
     }
 
@@ -3918,11 +4342,20 @@ export default class GitGraph extends View {
         const remoteW = charWidth(ref.pairedRemote.text.split("/")[0] || "");
         return Math.min(maxBadgeW, 37 + textWidth + remoteW);
       }
+      if (ref.kind === "tag") {
+        const remoteLabel = this.tagRemoteLabel(ref.text);
+        if (remoteLabel) return Math.min(maxBadgeW, 37 + textWidth + charWidth(remoteLabel));
+      }
       return Math.min(maxBadgeW, 28 + textWidth);
     };
 
     const renderedBadges = visibleRefs.map((ref, idx) => {
       const badgeW = badgeWidth(ref);
+      const tagRemotes = ref.kind === "tag" ? this.tagRemotes(ref.text) : [];
+      const tagRemote = ref.kind === "tag" ? this.tagRemoteLabel(ref.text) : "";
+      const tip = tagRemotes.length
+        ? `${badgeTooltip(ref)} · on ${tagRemotes.join(", ")}`
+        : badgeTooltip(ref);
 
       // Combined pills store two hit boxes (branch and remote) so clicking
       // either side still filters to that ref.
@@ -4005,7 +4438,7 @@ export default class GitGraph extends View {
       return h_flex()
         .id(`ref-${ref.kind}-${commit.hash}-${idx}-${ref.text}`)
         .w(badgeW)
-        .tooltip(badgeTooltip(ref))
+        .tooltip(tip)
         .flex_none()
         .gap(4)
         .items_center()
@@ -4023,7 +4456,12 @@ export default class GitGraph extends View {
             .size(10)
             .flex_none()
         )
-        .child(div().min_w(0).truncate().child(ref.text));
+        .child(div().min_w(0).truncate().child(ref.text))
+        .when(Boolean(tagRemote), (e) =>
+          e
+            .child(div().w(1).h(9).flex_none().bg(color(bColor + "66")))
+            .child(div().flex_none().text_color(color(bColor + "b3")).child(tagRemote))
+        );
     });
 
     if (extraRefCount > 0) {
@@ -4581,6 +5019,10 @@ export default class GitGraph extends View {
                   const clickX = event?.local_position?.x;
                   if (typeof clickX === "number" && item._badgeBoxes) {
                     const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
+                    if (hit?.ref.kind === "tag") {
+                      this.openTagContextMenu(hit.ref, event, cx);
+                      return;
+                    }
                     if (hit && (hit.ref.kind === "local" || hit.ref.kind === "remote" || hit.ref.kind === "branch")) {
                       this.openBranchContextMenu(hit.ref, event, cx);
                       return;
@@ -6387,7 +6829,7 @@ export default class GitGraph extends View {
     const cMenu = this.contextMenu;
     if (!cMenu) return null;
 
-    const menuItem = (id, label, icon, onClick, hint = null, disabled = false) =>
+    const menuItem = (id, label, icon, onClick, hint = null, disabled = false, danger = false) =>
       h_flex()
         .id(id)
         .h(hint ? 30 : 26)
@@ -6413,7 +6855,13 @@ export default class GitGraph extends View {
             .flex()
             .items_center()
             .justify_center()
-            .child(icon ? svg(icon).size(12).text_color(color(disabled ? t.muted : t.dim)) : div())
+            .child(
+              icon
+                ? svg(icon)
+                    .size(12)
+                    .text_color(color(disabled ? t.muted : danger ? t.ansi1 : t.dim))
+                : div()
+            )
         )
         .child(
           hint
@@ -6421,9 +6869,18 @@ export default class GitGraph extends View {
                 .flex_1()
                 .min_w(0)
                 .gap(1)
-                .child(div().truncate().text_color(color(disabled ? t.muted : t.foreground)).child(label))
+                .child(
+                  div()
+                    .truncate()
+                    .text_color(color(disabled ? t.muted : danger ? t.ansi1 : t.foreground))
+                    .child(label)
+                )
                 .child(div().truncate().text_size(9).text_color(color(t.muted)).child(hint))
-            : div().flex_1().truncate().child(label)
+            : div()
+                .flex_1()
+                .truncate()
+                .text_color(color(disabled ? t.muted : danger ? t.ansi1 : t.foreground))
+                .child(label)
         );
 
     if (cMenu.type === "stash") {
@@ -6570,6 +7027,81 @@ export default class GitGraph extends View {
                 latest ? `${latest.ref} · ${latest.subject}` : "No stashes yet",
                 !latest
               )
+            )
+        );
+    }
+
+    if (cMenu.type === "tag") {
+      const ref = cMenu.ref;
+      const name = ref?.text || "";
+      return div()
+        .id("context-menu-backdrop")
+        .absolute()
+        .inset_0()
+        .on_mouse_down("left", (_e, cx) => this.closeContextMenu(cx))
+        .on_mouse_down("right", (_e, cx) => this.closeContextMenu(cx))
+        .child(
+          v_flex()
+            .id("tag-context-menu")
+            .absolute()
+            .left(cMenu.x)
+            .top(cMenu.y)
+            .w(240)
+            .p(4)
+            .rounded(8)
+            .bg(color(t.popover))
+            .border_1()
+            .border_color(color(t.border))
+            .shadow_lg()
+            .text_size(11)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_mouse_down("right", (_e, cx) => cx.stop_propagation())
+            .child(
+              h_flex()
+                .px(8)
+                .py(4)
+                .gap(6)
+                .items_center()
+                .child(svg("mods/git-graph/icons/tag.svg").size(12).text_color(color(t.ansi3)))
+                .child(div().flex_1().truncate().font_semibold().child(name))
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem(
+                "tmenu-publish",
+                "Publish Tag to Remote…",
+                "mods/git-graph/icons/push.svg",
+                (cx) => this.openModal("push-tag", { ref }, cx),
+                this.remotes.length
+                  ? this.remotes.length === 1
+                    ? `Push to ${this.remotes[0]}`
+                    : `Choose one of ${this.remotes.length} remotes`
+                  : "No remote configured",
+                this.remotes.length === 0
+              )
+            )
+            .child(
+              menuItem("tmenu-rename", "Rename Tag…", "mods/git-graph/icons/rename.svg", (cx) =>
+                this.openModal("rename-tag", { ref }, cx)
+              )
+            )
+            .child(
+              menuItem(
+                "tmenu-delete",
+                "Delete Tag…",
+                "mods/git-graph/icons/trash.svg",
+                (cx) => this.openModal("delete-tag", { ref }, cx),
+                null,
+                false,
+                true
+              )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem("tmenu-copy", "Copy Tag Name", "mods/git-graph/icons/copy.svg", (cx) => {
+                cx.write_to_clipboard(name);
+                notify({ title: "Tag copied", body: name, level: "success", timeout: 1500 });
+              })
             )
         );
     }
@@ -7068,6 +7600,76 @@ export default class GitGraph extends View {
       );
   }
 
+  /** One destination choice in the tag delete modal. */
+  tagTargetOption(value, title, hint, t, cx, danger = false) {
+    const dialog = this.modalDialog;
+    const selected = dialog?.target === value;
+    const tint = danger ? t.ansi1 : t.accent;
+    return h_flex()
+      .id(`tag-target-${value}`)
+      .px(8)
+      .py(6)
+      .gap(7)
+      .items_center()
+      .rounded(6)
+      .border_1()
+      .border_color(color(selected ? tint : t.border))
+      .bg(color(selected ? tint + "1f" : t.background))
+      .cursor_pointer()
+      .hover((s) => s.bg(color(selected ? tint + "1f" : t.hover)))
+      .on_click((_e, cx) => {
+        if (!this.modalDialog) return;
+        this.modalDialog.target = value;
+        this.modalDialog.error = null;
+        cx.notify();
+      })
+      .child(
+        div()
+          .size(12)
+          .flex_none()
+          .rounded_full()
+          .border_1()
+          .border_color(color(selected ? tint : t.border))
+          .flex()
+          .items_center()
+          .justify_center()
+          .when(selected, (el) => el.child(div().size(6).rounded_full().bg(color(tint))))
+      )
+      .child(
+        v_flex()
+          .flex_1()
+          .min_w(0)
+          .gap(2)
+          .child(div().font_semibold().text_size(11).text_color(color(danger ? t.ansi1 : t.foreground)).child(title))
+          .child(div().text_size(10).text_color(color(t.muted)).child(hint))
+      );
+  }
+
+  /** One remote choice in the tag publish/delete modals. */
+  tagRemoteOption(remote, t, cx) {
+    const selected = this.modalDialog?.remote === remote;
+    return h_flex()
+      .id(`tag-remote-${remote}`)
+      .px(8)
+      .py(4)
+      .gap(5)
+      .items_center()
+      .rounded(5)
+      .border_1()
+      .border_color(color(selected ? t.accent : t.border))
+      .bg(color(selected ? t.selected : t.background))
+      .cursor_pointer()
+      .hover((s) => s.bg(color(selected ? t.selected : t.hover)))
+      .on_click((_e, cx) => {
+        if (!this.modalDialog) return;
+        this.modalDialog.remote = remote;
+        this.modalDialog.error = null;
+        cx.notify();
+      })
+      .child(svg("mods/git-graph/icons/push.svg").size(10).text_color(color(selected ? t.accent : t.dim)))
+      .child(div().text_size(10.5).text_color(color(selected ? t.foreground : t.dim)).child(remote));
+  }
+
   /** One private/public choice in the publish-to-GitHub modal. */
   publishVisibilityOption(value, label, hint, t, cx) {
     const selected = this.modalDialog?.visibility === value;
@@ -7111,7 +7713,11 @@ export default class GitGraph extends View {
     const shownModels = dialog.type === "clean-model" ? this.cleanVisibleModels(dialog) : [];
     const selectedBase = String(dialog.selected || "").split("#")[0];
     const renameDraft =
-      dialog.type === "rename-branch" ? String(this.modalInput?.value() || "").trim() : "";
+      dialog.type === "rename-branch" || dialog.type === "rename-tag"
+        ? String(this.modalInput?.value() || "").trim()
+        : "";
+    const tagDeleteRemotes = dialog.type === "delete-tag" ? dialog.availableRemotes || [] : [];
+    const tagDeleteErrors = dialog.type === "delete-tag" ? (dialog.remotes || []).filter((r) => r.error) : [];
     // A fixed frame keeps the header, hint and buttons on screen while the
     // model list scrolls inside it, even in a short docked panel.
     const modelDialog = dialog.type === "clean-model";
@@ -7156,7 +7762,13 @@ export default class GitGraph extends View {
                       .text_size(13)
                       .text_color(color(t.foreground))
                       .child(
-                        dialog.type === "clean-model"
+                        dialog.type === "rename-tag"
+                          ? `Rename Tag '${dialog.oldTag}'`
+                          : dialog.type === "push-tag"
+                          ? `Publish Tag '${dialog.tag}'`
+                          : dialog.type === "delete-tag"
+                          ? `Delete Tag '${dialog.tag}'`
+                          : dialog.type === "clean-model"
                           ? "AI commit model"
                           : dialog.type === "stash"
                           ? dialog.stashStaged
@@ -7237,7 +7849,21 @@ export default class GitGraph extends View {
                   .text_size(11)
                   .text_color(color(t.muted))
                   .child(
-                    dialog.type === "clean-model"
+                    dialog.type === "rename-tag"
+                      ? `Create '${renameDraft || "…"}' at the same commit and remove '${dialog.oldTag}'; annotated tags keep their message`
+                      : dialog.type === "push-tag"
+                      ? `Push local tag '${dialog.tag}' to '${dialog.remote || "the selected remote"}'`
+                      : dialog.type === "delete-tag"
+                      ? dialog.checking
+                        ? `Checking local and remote copies of '${dialog.tag}'…`
+                        : dialog.target === "both"
+                          ? `Remove '${dialog.tag}' from this repository and from '${dialog.remote}'`
+                          : dialog.target === "remote"
+                            ? `Delete '${dialog.tag}' from '${dialog.remote}'; the local tag is kept`
+                            : dialog.target === "local"
+                              ? `Remove local tag '${dialog.tag}'; remote copies are kept`
+                              : `Choose where to delete '${dialog.tag}'`
+                      : dialog.type === "clean-model"
                       ? `Currently configured to use ${cleanModelLabel(dialog.activeModel || this.cleanAgentModelLabel())}. Choose a model or click Start agent.`
                       : dialog.type === "stash"
                       ? dialog.stashStaged
@@ -7316,6 +7942,36 @@ export default class GitGraph extends View {
                 .text_size(10.5)
                 .text_color(color(t.ansi1))
                 .child("⚠️ Deleting a remote branch permanently removes it from the remote repository. This cannot be undone.")
+            )
+          )
+          .when(dialog.type === "delete-tag" && (dialog.target === "remote" || dialog.target === "both"), (e) =>
+            e.child(
+              div()
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi1 + "18"))
+                .border_1()
+                .border_color(color(t.ansi1 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi1))
+                .child(
+                  `⚠️ Deleting '${dialog.tag}' from '${dialog.remote}' is permanent: remote tags have no local reflog, so the ref cannot be recovered.`
+                )
+            )
+          )
+          .when(dialog.type === "push-tag", (e) =>
+            e.child(
+              div()
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi3 + "18"))
+                .border_1()
+                .border_color(color(t.ansi3 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi3))
+                .child(
+                  "Publishing never force-updates a tag. If the remote already has a different tag with this name, git rejects the push."
+                )
             )
           )
           .when(dialog.type === "confirm-delete-worktree-branch", (e) =>
@@ -7741,6 +8397,139 @@ export default class GitGraph extends View {
                   )
               )
           )
+          // Tag rename input
+          .when(dialog.type === "rename-tag", (e) =>
+            e
+              .child(
+                Input.new(this.modalInput)
+                  .id("modal-rename-tag-input")
+                  .h(32)
+                  .w_full()
+                  .px(8)
+                  .rounded(6)
+                  .border_1()
+                  .border_color(color(t.border))
+                  .bg(color(t.background))
+                  .text_size(12)
+                  .text_color(color(t.foreground))
+              )
+              .child(
+                div()
+                  .text_size(9.5)
+                  .text_color(color(t.muted))
+                  .child(`New local tag: ${renameDraft || "…"}`)
+              )
+              .child(
+                div()
+                  .text_size(9.5)
+                  .text_color(color(t.muted))
+                  .child(
+                    "Annotated tags keep their message; GPG signatures are not recreated. A remote copy is not renamed."
+                  )
+              )
+          )
+          // Publish a local tag to one remote.
+          .when(dialog.type === "push-tag", (e) =>
+            e.child(
+              v_flex()
+                .gap(8)
+                .child(
+                  v_flex()
+                    .gap(4)
+                    .child(div().text_size(10.5).text_color(color(t.muted)).child("Remote"))
+                    .when(this.remotes.length === 0, (el) =>
+                      el.child(div().text_size(10.5).text_color(color(t.ansi1)).child("No remote configured"))
+                    )
+                    .when(this.remotes.length > 0, (el) =>
+                      el.child(
+                        h_flex()
+                          .gap(6)
+                          .flex_wrap()
+                          .children(this.remotes.map((remote) => this.tagRemoteOption(remote, t, cx)))
+                      )
+                    )
+                )
+                .child(
+                  div()
+                    .text_size(9.5)
+                    .text_color(color(t.muted))
+                    .child(`git push ${dialog.remote || "remote"} refs/tags/${dialog.tag}:refs/tags/${dialog.tag}`)
+                )
+            )
+          )
+          // Delete scope for a tag that may exist locally, remotely, or both.
+          .when(dialog.type === "delete-tag", (e) =>
+            e.child(
+              v_flex()
+                .gap(6)
+                .max_h(230)
+                .overflow_y_scrollbar()
+                .when(dialog.checking, (el) =>
+                  el.child(
+                    h_flex()
+                      .p(8)
+                      .gap(6)
+                      .items_center()
+                      .child(div().text_size(10.5).text_color(color(t.muted)).child("Checking local and remote copies…"))
+                  )
+                )
+                .when(!dialog.checking && Boolean(dialog.local), (el) =>
+                  el.child(
+                    this.tagTargetOption("local", "Local only", "Remove the tag from this repository", t, cx)
+                  )
+                )
+                .when(!dialog.checking && tagDeleteRemotes.length > 0, (el) =>
+                  el.child(
+                    this.tagTargetOption(
+                      "remote",
+                      "Remote only",
+                      `Delete it from ${dialog.remote}; keep the local tag`,
+                      t,
+                      cx,
+                      true
+                    )
+                  )
+                )
+                .when(!dialog.checking && Boolean(dialog.local) && tagDeleteRemotes.length > 0, (el) =>
+                  el.child(
+                    this.tagTargetOption(
+                      "both",
+                      "Local and remote",
+                      `Remove it here and from ${dialog.remote}`,
+                      t,
+                      cx,
+                      true
+                    )
+                  )
+                )
+                .when(!dialog.checking && tagDeleteRemotes.length > 1 && dialog.target !== "local", (el) =>
+                  el.child(
+                    v_flex()
+                      .gap(4)
+                      .child(div().text_size(10).text_color(color(t.muted)).child("Remote for this operation"))
+                      .child(
+                        h_flex()
+                          .gap(6)
+                          .flex_wrap()
+                          .children(tagDeleteRemotes.map((remote) => this.tagRemoteOption(remote, t, cx)))
+                      )
+                  )
+                )
+                .when(!dialog.checking && tagDeleteErrors.length > 0, (el) =>
+                  el.child(
+                    div()
+                      .text_size(9)
+                      .text_color(color(t.ansi3))
+                      .child(
+                        tagDeleteErrors
+                          .map((r) => `Could not check ${r.name}: ${r.error}`)
+                          .join(" · ")
+                          .slice(0, 240)
+                      )
+                  )
+                )
+            )
+          )
           // Tag inputs: Name + Optional message
           .when(dialog.type === "tag", (e) =>
             e
@@ -7996,7 +8785,7 @@ export default class GitGraph extends View {
                   .bg(color(
                     dialog.type === "reset" && dialog.resetMode === "hard"
                       ? t.ansi1
-                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "drop-stash"
+                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "delete-tag" || dialog.type === "drop-stash"
                       ? t.ansi1
                       : t.solid
                   ))
@@ -8015,12 +8804,16 @@ export default class GitGraph extends View {
                         : "Choose a model first"
                     );
                   })
+                  .when(dialog.type === "delete-tag" && (dialog.checking || !dialog.target), (e) =>
+                    e.opacity(0.5).cursor_not_allowed()
+                  )
+                  .disabled(dialog.type === "delete-tag" && (Boolean(dialog.checking) || !dialog.target))
                   .on_click((_e, cx) => this.submitModal(cx))
                   .child(
                     this.busy || this.installingOpencode || dialog.installing
                       ? dialog.type === "clean-model" && dialog.opencodeInstalled === false
                         ? "Installing OpenCode…"
-                        : dialog.type === "publish"
+                        : dialog.type === "publish" || dialog.type === "push-tag"
                         ? "Publishing…"
                         : dialog.type === "stash"
                         ? "Stashing…"
@@ -8028,9 +8821,9 @@ export default class GitGraph extends View {
                         ? "Unstashing…"
                         : dialog.type === "drop-stash"
                         ? "Dropping…"
-                        : dialog.type === "rename-branch"
+                        : dialog.type === "rename-branch" || dialog.type === "rename-tag"
                         ? "Renaming…"
-                        : dialog.type === "confirm-delete-remote-branch" || dialog.type === "confirm-delete-worktree-branch"
+                        : dialog.type === "confirm-delete-remote-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "delete-tag"
                         ? "Deleting…"
                         : "Working…"
                       : dialog.type === "clean-model"
@@ -8051,6 +8844,8 @@ export default class GitGraph extends View {
                       ? "Drop Stash"
                       : dialog.type === "publish"
                       ? "Create & Push"
+                      : dialog.type === "push-tag"
+                      ? "Publish Tag"
                       : dialog.type === "branch"
                       ? "Create Branch"
                       : dialog.type === "tag"
@@ -8075,6 +8870,18 @@ export default class GitGraph extends View {
                       ? "Delete Branch and Worktree"
                       : dialog.type === "confirm-delete-branch"
                       ? "Delete Branch"
+                      : dialog.type === "delete-tag"
+                      ? dialog.checking
+                        ? "Checking…"
+                        : dialog.target === "both"
+                          ? "Delete Local and Remote"
+                          : dialog.target === "remote"
+                            ? "Delete Remote Tag"
+                            : dialog.target === "local"
+                              ? "Delete Local Tag"
+                              : "Delete Tag"
+                      : dialog.type === "rename-tag"
+                      ? "Rename Tag"
                       : dialog.type === "rename-branch"
                       ? dialog.ref?.kind === "remote"
                         ? "Rename Remote Branch"
@@ -8366,7 +9173,7 @@ export default class GitGraph extends View {
               .border_1()
               .border_color(color(t.border))
               .hover((s) => s.bg(color(t.hover)))
-              .on_click((_e, cx) => this.refresh(cx))
+              .on_click((_e, cx) => this.refresh(cx, { remoteTags: true }))
               .child(svg("mods/git-graph/icons/refresh.svg").size(12).text_color(color(t.dim)))
           )
           // From a docked panel, open this repository full size in a tab.
