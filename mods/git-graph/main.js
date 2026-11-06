@@ -34,6 +34,7 @@ import {
   terminals,
   layout,
   closeOverlay,
+  appHome,
 } from "herdr";
 import {
   countLines,
@@ -62,6 +63,10 @@ import {
   isLightColor,
   fileIconPath,
   FOLDER_ICON_PATH,
+  FILE_EDITOR_MOD,
+  FILE_EDITOR_INSTALL_HINT,
+  fileEditorTabTarget,
+  resolveRepoPath,
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
@@ -69,6 +74,15 @@ import {
   deleteRemoteBranchArgs,
   fetchRemoteBranchArgs,
   renameRemoteBranchPushArgs,
+  parseWorktreeList,
+  worktreeBranchMap,
+  findBranchCheckout,
+  markWorktreeRefs,
+  findCheckoutSpace,
+  mergedCheckArgs,
+  removeWorktreeArgs,
+  normalizeCheckoutPath,
+  SPACE_ACTIONS_MOD,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
 } from "./git-logic.js";
@@ -105,7 +119,14 @@ const CLEAN_AGENT_MODEL_PREFERENCE = [
 ];
 const CLEAN_AGENT_MODEL = CLEAN_AGENT_MODEL_PREFERENCE[0];
 const CLEAN_AGENT_MODEL_KEY = "git-graph.cleanAgentModel";
+// One worker per checkout: the machine and repository root are appended to
+// this base key so several spaces can clean different repositories at the same
+// time. The bare key stays as the fallback when no repository is resolved (and
+// drains a worker started by an older copy of this mod before it was reloaded).
 const CLEAN_AGENT_WORKER_KEY = "git-graph.activeTreeAgent";
+// The keys that may hold a worker. Polling this index keeps a run settle-able
+// even when no view of that checkout is open.
+const CLEAN_AGENT_WORKER_KEYS_KEY = "git-graph.activeTreeAgentKeys";
 const CLEAN_AGENT_LABEL = "AI commit worker";
 // How long one copy of the mod holds the shared poll lease (milliseconds).
 // Longer than a slow `opencode api` call, shorter than a stalled poll's wait.
@@ -319,6 +340,13 @@ export default class GitGraph extends View {
     this.commitDetails = null;
     this.commitFiles = [];
     this.selectedFile = null;
+    this.hoveredFilePath = null;
+    // null while the live mods folder is checked, then true/false.
+    this.fileEditorAvailable = null;
+    // null while the worktree-plus (space-actions) mod is checked, then true/false.
+    this.spaceActionsAvailable = null;
+    // Every checkout of this repo from `git worktree list` (see parseWorktreeList).
+    this.checkouts = [];
     this.collapsedFolders = new Set();
     this.diffRows = [];
     this.diffLeft = [];
@@ -374,18 +402,13 @@ export default class GitGraph extends View {
     this.detached = false;
     this.remoteAction = null; // "fetch" | "pull" | "push" while one is running
 
-    // Background AI commit worker. The terminal it runs in is closed as soon
-    // as its commits land and the tree is clean.
-    this.treeAgentStarting = false;
-    this.treeAgentChecking = false; // this copy has a finish/stop check in flight
-    this.treeAgentCheck = null; // { sessionId, at } of this copy's last finish check
+    // Background AI commit worker, independent per checkout. The terminal it
+    // runs in is closed as soon as its commits land and the tree is clean.
+    this.treeAgentStartingKeys = new Set(); // space keys whose launch is in flight
+    this.treeAgentChecks = new Map(); // space key -> { sessionId, at, inFlight }
     this.treeAgentModel = null; // last resolved model id
     this.cleanModelsCache = null; // { at, root, on, models } from `opencode models`
     this.opencodeInstalled = props()?.noOpencode ? false : null; // boolean | null when unknown
-
-    if (this.getTreeAgent()) {
-      cx.timer.after(500, (cx) => this.pollTreeAgent(cx));
-    }
 
     if (props()?.openModelPicker) {
       cx.timer.after(300, (cx) => {
@@ -394,6 +417,15 @@ export default class GitGraph extends View {
     }
 
     this.handle = cx.focus_handle();
+
+    // Opening a changed file needs the file-editor mod. Re-check until it is
+    // present so installing it enables the button without reopening the tab.
+    this.detectFileEditor(cx);
+    this.detectSpaceActions(cx);
+    cx.timer.every(15000, (cx) => {
+      if (this.fileEditorAvailable !== true) this.detectFileEditor(cx);
+      if (this.spaceActionsAvailable !== true) this.detectSpaceActions(cx);
+    });
 
     if (this.diffMode) {
       this.diffScroll = VirtualListScrollHandle.new();
@@ -414,7 +446,11 @@ export default class GitGraph extends View {
 
     this.searchInput = InputState.new({ placeholder: "Filter commits, authors, hashes, refs…" });
     // OpenCode Mini does not report agent status; follow its session instead.
-    cx.timer.every(3000, (cx) => this.pollTreeAgent(cx));
+    // A worker may already be running, so settle it once right away.
+    if (this.hasTreeAgent()) {
+      cx.timer.after(500, (cx) => this.pollTreeAgents(cx));
+    }
+    cx.timer.every(3000, (cx) => this.pollTreeAgents(cx));
     this.searchInput.on("change", (_e, cx) => {
       this.searchQuery = this.searchInput.value().toLowerCase().trim();
       this.applyFilter();
@@ -434,7 +470,7 @@ export default class GitGraph extends View {
       while (true) {
         const cmd = await nextCommand();
         if (cmd === "focus") {
-          this.handle.focus();
+          this.focusActiveInput(cx);
           cx.notify();
         }
       }
@@ -468,13 +504,108 @@ export default class GitGraph extends View {
   async close(_cx) {
     this.watched = null;
     this.watchToken = null;
+    // A diff tab never owns the AI worker's toast.
+    if (this.diffMode) return;
     // A closed graph tab must not leave a 12-hour progress toast behind.
     // Its poll timer dies with it, so the toast cannot be left for later.
+    // Only this copy's space is touched; other spaces keep their own workers.
     const worker = this.getTreeAgent();
     if (worker?.toastId) {
       this.closeTreeAgentToast(worker);
       this.setTreeAgent({ ...worker, toastId: null });
     }
+  }
+
+  /**
+   * Checks the live mods folder for the file-editor mod. Herdr loads mods from
+   * this machine even when the repository lives in a remote space.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
+   */
+  detectFileEditor(cx) {
+    cx.spawn(async (cx) => {
+      let available = false;
+      try {
+        const manifest = await readTextFile(`${appHome()}/mods/${FILE_EDITOR_MOD}/mod.json`);
+        available = typeof manifest === "string";
+      } catch {
+        available = false;
+      }
+      if (this.fileEditorAvailable !== available) {
+        this.fileEditorAvailable = available;
+        cx.notify();
+      }
+    });
+  }
+
+  /**
+   * Checks the live mods folder for the worktree-plus (space-actions) mod. The
+   * branch menu switches to a branch's worktree space and removes worktree
+   * branches only while that mod is present; otherwise it keeps plain git.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
+   */
+  detectSpaceActions(cx) {
+    cx.spawn(async (cx) => {
+      let available = false;
+      try {
+        const manifest = await readTextFile(`${appHome()}/mods/${SPACE_ACTIONS_MOD}/mod.json`);
+        available = typeof manifest === "string";
+      } catch {
+        available = false;
+      }
+      if (this.spaceActionsAvailable !== available) {
+        this.spaceActionsAvailable = available;
+        cx.notify();
+      }
+    });
+  }
+
+  /**
+   * Opens one changed file in the file-editor mod. Reuses a live file-editor
+   * tab recorded in shared state, and explains the dependency when the mod is
+   * missing instead of asking Herdr to open a tab that cannot render.
+   *
+   * @param {string} path Repository-relative file path.
+   * @param {import("./gpui-kit.js").ViewContext} cx
+   */
+  openFileInEditor(path, cx) {
+    if (this.fileEditorAvailable !== true) {
+      notify({
+        title: "file-editor mod required",
+        body: FILE_EDITOR_INSTALL_HINT,
+        level: "warning",
+      });
+      return;
+    }
+    const root = this.root;
+    if (!root) return;
+
+    const activeTabs = spaces().find((space) => space.active)?.tabs ?? [];
+    const editorTabIds = new Set(
+      panes()
+        .filter((pane) => pane.mod === FILE_EDITOR_MOD)
+        .map((pane) => pane.tab)
+    );
+    const sharedTabs = shared("file-editor.openTabs");
+    const openTabs = sharedTabs && typeof sharedTabs === "object" ? sharedTabs : {};
+    const target = fileEditorTabTarget(root, path, activeTabs, openTabs, editorTabIds);
+
+    if (target.existingTabId) {
+      run("tab.select", { id: target.existingTabId });
+      cx.notify();
+      return;
+    }
+    if (target.entry) {
+      setShared("file-editor.openTabs", { ...openTabs, [target.fileKey]: target.entry });
+    }
+
+    /** @type {Record<string, any>} */
+    const tabProps = { folder: root, file: path };
+    const on = this.on ?? this.diffOn;
+    if (on) tabProps.on = on;
+    run("tab.new", { name: target.tabName, mod: FILE_EDITOR_MOD, props: tabProps });
+    cx.notify();
   }
 
   /** Reads the one diff this tab was opened for, as a unified diff string. */
@@ -1303,6 +1434,9 @@ export default class GitGraph extends View {
   }
 
   applyFilter() {
+    // Runs on every path that replaces commits (refresh and the branch-filter
+    // fast path), so the worktree badge flags follow the rebuilt display refs.
+    markWorktreeRefs(this.commits, this.checkouts);
     let matched = this.commits;
     if (this.searchQuery) {
       const q = this.searchQuery;
@@ -1500,6 +1634,7 @@ export default class GitGraph extends View {
           this.stashNodes = [];
           this.stagedCount = 0;
           this.commitDetailsCache.clear();
+          this.checkouts = [];
           cx.notify();
         }
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
@@ -1514,6 +1649,7 @@ export default class GitGraph extends View {
           stashRes,
           statusRes,
           logRes,
+          checkoutsRes,
         ] = await Promise.all([
           detectInProgress(root, on),
           git(["branch", "--show-current"]),
@@ -1523,6 +1659,7 @@ export default class GitGraph extends View {
           git(["stash", "list", "--format=%gd%x1f%H%x1f%P%x1f%gs%x1f%at%x1f%an%x1f%ae"]),
           git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]),
           git(logArgs(this.branchFilter, this.commitLimit)),
+          git(["worktree", "list", "--porcelain"]),
         ]);
         if (this.getKey() !== context) return;
 
@@ -1700,6 +1837,7 @@ export default class GitGraph extends View {
         this.workingTreeFiles = wtFiles;
         this.stagedCount = stagedCount;
         this.stashes = stashes;
+        this.checkouts = checkoutsRes.code === 0 ? parseWorktreeList(checkoutsRes.stdout) : [];
         this.commits = commits;
         this.error = logError;
         this.applyFilter();
@@ -2189,6 +2327,90 @@ export default class GitGraph extends View {
     );
   }
 
+  /**
+   * Selects the space that shows a branch's checkout in another worktree (or in
+   * the main checkout), or opens one when none exists. Git would refuse a second
+   * checkout of the same branch, so no `git checkout` runs here.
+   *
+   * @param {{ path: string, main: boolean }} checkout the checkout that holds the branch
+   * @param {string} branch
+   */
+  switchToCheckoutSpace(checkout, branch) {
+    const space = findCheckoutSpace(
+      checkout.path,
+      spaces(),
+      panes(),
+      this.on ?? null,
+      this.checkouts.map((c) => c.path)
+    );
+    if (space) run("space.select", { id: space.id });
+    else run("space.new", { folder: checkout.path, machine: this.on ?? null });
+    notify({
+      title: "Switched space",
+      body: `'${branch}' is checked out in ${checkout.path}`,
+      level: "success",
+    });
+  }
+
+  /**
+   * Starts "Delete Branch and Worktree" for a branch checked out in a linked
+   * worktree. Git refuses to delete an unmerged branch, so the merge check runs
+   * first: an unmerged branch gets an error toast and no dialog.
+   *
+   * @param {{ kind: string, text: string }} ref
+   * @param {import("./gpui-kit.js").ViewContext} cx
+   */
+  startWorktreeBranchDelete(ref, cx) {
+    this.closeContextMenu(cx);
+    const name = ref.text;
+    const root = this.root;
+    const on = this.on;
+    const headLabel = this.currentBranch || "HEAD";
+    const worktreePath = worktreeBranchMap(this.checkouts).get(name);
+    if (!root || !worktreePath) return;
+    // The current branch is always checked out in this root, so it is never removed here.
+    if (name === this.currentBranch || normalizeCheckoutPath(root) === normalizeCheckoutPath(worktreePath)) {
+      notify({
+        title: "Worktree in use",
+        body: "Open the main checkout to delete this worktree branch.",
+        level: "error",
+      });
+      return;
+    }
+
+    this.busy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const merged = await exec("git", mergedCheckArgs(name), { cwd: root, on });
+        if (merged.code === 1) {
+          notify({
+            title: "Worktree not merged",
+            body: `'${name}' is not merged into ${headLabel}. Merge it first.`,
+            level: "error",
+          });
+          return;
+        }
+        if (merged.code !== 0) {
+          notify({
+            title: "Git Error",
+            body: (merged.stderr || merged.stdout).trim() || "Could not check the merge status",
+            level: "error",
+          });
+          return;
+        }
+        this.openModal(
+          "confirm-delete-worktree-branch",
+          { ref: { kind: "local", text: name }, worktreePath, headBranch: headLabel },
+          cx
+        );
+      } finally {
+        this.busy = false;
+        cx.notify();
+      }
+    });
+  }
+
   openBranchContextMenu(ref, e, cx, overrideX, overrideY) {
     const normRef = typeof ref === "string" ? { kind: this.branchRefKind(ref), text: ref } : { ...ref };
     if (normRef.kind === "local" && !normRef.pairedRemote) {
@@ -2258,10 +2480,46 @@ export default class GitGraph extends View {
     cx.notify();
   }
 
+  /** Right-click menu for one file in the changed-files tree. */
+  openFileContextMenu(file, e, cx, overrideX, overrideY) {
+    if (!file || file.isDir) return;
+    const menuWidth = 300;
+    const menuHeight = 180;
+    const origin = this.rootOrigin;
+    const b = /** @type {any} */ (this.rootBounds);
+    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
+    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
+
+    const maxW = this.width || b?.width || 600;
+    const maxH = this.height || b?.height || 600;
+    if (x + menuWidth > maxW) {
+      x = Math.max(10, maxW - menuWidth - 10);
+    }
+    if (y + menuHeight > maxH) {
+      y = Math.max(10, maxH - menuHeight - 10);
+    }
+    this.selectedFile = file.path;
+    this.contextMenu = { type: "file", file, x, y };
+    cx.notify();
+  }
+
   closeContextMenu(cx) {
     if (this.contextMenu) {
       this.contextMenu = null;
       if (cx) cx.notify();
+    }
+  }
+
+  /**
+   * Gives the keyboard to whatever should own it: an open modal's input, or
+   * the graph itself. Herdr sends "focus" when a popup over this copy closes,
+   * and that must not pull the keyboard out of a dialog that is still open.
+   */
+  focusActiveInput(cx) {
+    if (this.modalDialog && this.modalInput) {
+      this.focusModalInput(cx);
+    } else {
+      this.handle.focus();
     }
   }
 
@@ -2376,6 +2634,17 @@ export default class GitGraph extends View {
       this.focusModalInput(cx);
     } else if (type === "confirm-merge-branch" || type === "confirm-delete-remote-branch") {
       this.modalDialog = { type, ref: target?.ref || target, error: null };
+      this.modalInput = null;
+    } else if (type === "confirm-delete-worktree-branch") {
+      // Keeps the checkout path so confirm can remove that worktree.
+      this.modalDialog = {
+        type,
+        ref: target?.ref,
+        worktreePath: target?.worktreePath ?? null,
+        headBranch: target?.headBranch ?? null,
+        worktreeRemoved: false,
+        error: null,
+      };
       this.modalInput = null;
     } else if (type.startsWith("confirm-")) {
       this.modalDialog = { type, commit: target?.commit || target, ref: target?.ref, error: null };
@@ -2961,6 +3230,69 @@ export default class GitGraph extends View {
               fail(errStr || "Failed to delete branch");
             }
           }
+        } else if (type === "confirm-delete-worktree-branch") {
+          const bName = ref?.text || "";
+          const wtPath = dialog.worktreePath || "";
+          const headLabel = dialog.headBranch || "HEAD";
+          if (!bName || !wtPath) {
+            fail("No worktree branch selected");
+            return;
+          }
+          if (bName === branchName || normalizeCheckoutPath(root) === normalizeCheckoutPath(wtPath)) {
+            fail("Open the main checkout to delete this worktree branch.");
+            return;
+          }
+          if (!dialog.worktreeRemoved) {
+            // Re-check the merge: the branch may have moved since the dialog
+            // opened, and nothing is removed unless it is still merged.
+            const merged = await exec("git", mergedCheckArgs(bName), { cwd: root, on });
+            if (merged.code !== 0) {
+              fail(
+                merged.code === 1
+                  ? `'${bName}' is not merged into ${headLabel}. Merge it first.`
+                  : (merged.stderr || merged.stdout).trim() || "Could not check the merge status"
+              );
+              return;
+            }
+            const space = findCheckoutSpace(
+              wtPath,
+              spaces(),
+              panes(),
+              on ?? null,
+              this.checkouts.map((c) => c.path)
+            );
+            // The space closes first: a terminal left in the folder keeps it busy.
+            if (space) run("space.close", { id: space.id, confirmed: true });
+            const rm = await exec("git", [...NON_INTERACTIVE, ...removeWorktreeArgs(wtPath)], { cwd: root, on });
+            if (rm.code !== 0) {
+              const why = (rm.stderr || rm.stdout).trim() || "git worktree remove failed";
+              fail(
+                space
+                  ? `${why} (its Herdr space was already closed; the worktree and branch are kept)`
+                  : why
+              );
+              this.refresh(cx);
+              return;
+            }
+            dialog.worktreeRemoved = true;
+          }
+          const del = await exec("git", [...NON_INTERACTIVE, "branch", "-d", "--end-of-options", bName], { cwd: root, on });
+          if (del.code !== 0) {
+            const why = (del.stderr || del.stdout).trim() || "git branch -d failed";
+            fail(`Worktree at ${wtPath} was removed, but branch '${bName}' was kept: ${why}`);
+            this.refresh(cx);
+            return;
+          }
+          this.closeModal(cx);
+          if (this.branchFilter === bName) {
+            this.branchFilter = "all";
+          }
+          notify({
+            title: "Worktree branch deleted",
+            body: `Deleted worktree branch '${bName}' and its worktree`,
+            level: "success",
+          });
+          this.refresh(cx);
         } else if (type === "confirm-delete-remote-branch") {
           const bName = typeof ref === "string" ? ref : ref?.text || "";
           if (!bName) {
@@ -3621,7 +3953,10 @@ export default class GitGraph extends View {
 
       const isTag = ref.kind === "tag";
       const isRemote = ref.kind === "remote";
-      const bColor = isTag ? t.ansi3 : isRemote ? t.ansi5 : t.ansi4;
+      // A branch checked out in a linked worktree gets its own colour (ansi6),
+      // distinct from local (ansi4), tag (ansi3) and remote (ansi5).
+      const isWorktree = Boolean(ref.isWorktree);
+      const bColor = isTag ? t.ansi3 : isRemote ? t.ansi5 : isWorktree ? t.ansi6 : t.ansi4;
       const isFilteredThis = this.branchFilter === ref.text;
       const fg = isFilteredThis ? t.background : bColor;
 
@@ -3648,7 +3983,7 @@ export default class GitGraph extends View {
           .text_size(10)
           .overflow_hidden()
           .child(
-            svg(`mods/git-graph/icons/${head ? "check" : "branch"}.svg`)
+            svg(`mods/git-graph/icons/${head ? "check" : isWorktree ? "worktree" : "branch"}.svg`)
               .size(10)
               .flex_none()
           )
@@ -3679,7 +4014,7 @@ export default class GitGraph extends View {
         .text_size(10)
         .overflow_hidden()
         .child(
-          svg(`mods/git-graph/icons/${isTag ? "tag" : ref.isHead ? "check" : "branch"}.svg`)
+          svg(`mods/git-graph/icons/${isTag ? "tag" : ref.isHead ? "check" : isWorktree ? "worktree" : "branch"}.svg`)
             .size(10)
             .flex_none()
         )
@@ -3846,6 +4181,35 @@ export default class GitGraph extends View {
     );
   }
 
+  /**
+   * Hover action that opens one changed file in the file-editor mod. The slot
+   * always occupies its width, so revealing it does not shift the file name.
+   * Without the mod it stays visibly disabled and explains what to install in
+   * both its tooltip and a click toast.
+   */
+  renderOpenFileButton(path, t, cx, revealed) {
+    const available = this.fileEditorAvailable === true;
+    return h_flex()
+      .id(`open-file-${path}`)
+      .flex_none()
+      .p(3)
+      .rounded(4)
+      .opacity(revealed ? (available ? 1 : 0.45) : 0)
+      .when(available, (e) =>
+        e
+          .cursor_pointer()
+          .hover((s) => s.bg(color(this.selectedFile === path ? t.hover : t.selected)))
+          .text_color(color(t.accent))
+      )
+      .when(!available, (e) => e.cursor_not_allowed().text_color(color(t.dim)))
+      .tooltip(available ? "Open in file editor" : FILE_EDITOR_INSTALL_HINT)
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.openFileInEditor(path, cx);
+      })
+      .child(svg("mods/git-graph/icons/open-file.svg").size(12));
+  }
+
   /** One VS Code-style folder or file row in the changes tree. */
   renderTreeRow(row, t, cx) {
     const isFileSelected = !row.isDir && this.selectedFile === row.path;
@@ -3867,10 +4231,27 @@ export default class GitGraph extends View {
       .hover((s) => s.bg(color(isFileSelected ? t.selected : t.hover)))
       .cursor_pointer()
       .tooltip(tip)
+      .on_hover((hovered, cx) => {
+        if (hovered) {
+          if (this.hoveredFilePath !== row.path) {
+            this.hoveredFilePath = row.path;
+            cx.notify();
+          }
+        } else if (this.hoveredFilePath === row.path) {
+          this.hoveredFilePath = null;
+          cx.notify();
+        }
+      })
       .on_click((_e, cx) => {
         if (row.isDir) this.toggleFolder(row.path, cx);
         else this.openDiffTab(row.path, cx);
       })
+      .when(!row.isDir, (e) =>
+        e.on_mouse_down("right", (event, cx) => {
+          cx.stop_propagation();
+          this.openFileContextMenu(row, event, cx);
+        })
+      )
       .children(this.treeIndentGuides(row.depth, t))
       .child(
         div()
@@ -3894,15 +4275,28 @@ export default class GitGraph extends View {
       )
       .child(image(iconPath).size(14).flex_none())
       .child(
-        div()
+        h_flex()
           .flex_1()
           .min_w(0)
-          .pl(4)
-          .truncate()
-          .text_size(11)
-          .when(row.isDir, (e) => e.font_medium())
-          .text_color(color(t.foreground))
-          .child(row.name)
+          .items_center()
+          .gap(3)
+          .child(
+            div()
+              .min_w(0)
+              .flex_shrink(1)
+              .pl(4)
+              .truncate()
+              .text_size(11)
+              .when(row.isDir, (e) => e.font_medium())
+              .text_color(color(t.foreground))
+              .child(row.name)
+          )
+          .when(!row.isDir, (e) =>
+            e.child(this.renderOpenFileButton(row.path, t, cx, this.hoveredFilePath === row.path))
+          )
+          // Keep the status letter and line counts right-aligned even though the
+          // open-file button now hugs the file name instead of floating right.
+          .child(div().flex_1().min_w(0))
       )
       .when(!row.isDir, (e) =>
         e.child(
@@ -4645,40 +5039,105 @@ export default class GitGraph extends View {
   }
 
   /**
-   * The background worker, read from shared state every time. Each open copy
-   * of this mod keeps its own JS state, so a cached copy here would go stale
-   * and let a finished worker keep being reported by another copy.
+   * Shared-state key for one checkout's worker. Workers are independent per
+   * repository (and machine), so every space can clean its own tree while
+   * another one already runs. Two views of the same checkout share one worker,
+   * because two agents on one working tree would race over the same files.
    *
+   * @param {string | null} root
+   * @param {string | null} on
+   * @returns {string}
+   */
+  treeAgentKeyForRepo(root, on) {
+    if (!root) return CLEAN_AGENT_WORKER_KEY;
+    const scope = `${on ?? ""}|${normalizeCheckoutPath(root)}`;
+    return `${CLEAN_AGENT_WORKER_KEY}.${encodeURIComponent(scope)}`;
+  }
+
+  /** Shared-state key for the worker this copy shows and starts. */
+  treeAgentKey() {
+    return this.treeAgentKeyForRepo(this.root, this.on);
+  }
+
+  /**
+   * Every key that can hold a worker: every key recorded at launch (so a
+   * closed tab or another space's run still settles), plus the bare fallback.
+   * Copies poll all of them, so a run that finishes while another repository is
+   * selected still closes its toast and terminal.
+   *
+   * @returns {string[]}
+   */
+  treeAgentKeys() {
+    const keys = new Set(this.recordedTreeAgentKeys());
+    keys.add(CLEAN_AGENT_WORKER_KEY);
+    keys.add(this.treeAgentKey());
+    return [...keys];
+  }
+
+  /** Worker keys recorded at launch, including runs outside the current view. */
+  recordedTreeAgentKeys() {
+    const value = shared(CLEAN_AGENT_WORKER_KEYS_KEY);
+    return Array.isArray(value) ? value.filter((key) => typeof key === "string") : [];
+  }
+
+  /** Records a key with a launch in flight so every copy starts polling it. */
+  rememberTreeAgentKey(key) {
+    const keys = this.recordedTreeAgentKeys();
+    if (!keys.includes(key)) setShared(CLEAN_AGENT_WORKER_KEYS_KEY, [...keys, key]);
+  }
+
+  /** Drops a key once its worker is claimed or its launch failed. */
+  forgetTreeAgentKey(key) {
+    const keys = this.recordedTreeAgentKeys();
+    if (keys.includes(key)) setShared(CLEAN_AGENT_WORKER_KEYS_KEY, keys.filter((item) => item !== key));
+  }
+
+  /** True while any checkout still has a worker recorded. */
+  hasTreeAgent() {
+    return this.treeAgentKeys().some((key) => Boolean(this.getTreeAgent(key)));
+  }
+
+  /**
+   * The background worker of one checkout, read from shared state every time.
+   * Each open copy of this mod keeps its own JS state, so a cached copy here
+   * would go stale and let a finished worker keep being reported by another
+   * copy.
+   *
+   * @param {string} [key]
    * @returns {Record<string, any> | null}
    */
-  getTreeAgent() {
-    return shared(CLEAN_AGENT_WORKER_KEY) ?? null;
+  getTreeAgent(key = this.treeAgentKey()) {
+    return shared(key) ?? null;
   }
 
   /**
    * @param {Record<string, any> | null} agent
+   * @param {string} [key]
    */
-  setTreeAgent(agent) {
-    setShared(CLEAN_AGENT_WORKER_KEY, agent);
+  setTreeAgent(agent, key = this.treeAgentKey()) {
+    setShared(key, agent);
   }
 
   /**
-   * Atomically takes the worker out of shared state. Every open copy of the
-   * mod follows the same worker, so several copies can reach the same outcome
-   * (finished or stopped). Only the copy that wins this claim reports it and
-   * closes the terminal; the others find no worker and stop.
+   * Atomically takes one checkout's worker out of shared state. Several copies
+   * of the mod showing that checkout can reach the same outcome (finished or
+   * stopped). Only the copy that wins this claim reports it and closes the
+   * terminal; the others find no worker and stop. Other checkouts are
+   * untouched.
    *
    * @param {string} sessionId
+   * @param {string} [key]
    * @returns {Record<string, any> | null} the claimed worker, or null if another copy already took it
    */
-  claimTreeAgent(sessionId) {
-    const current = this.getTreeAgent();
+  claimTreeAgent(sessionId, key = this.treeAgentKey()) {
+    const current = this.getTreeAgent(key);
     if (!current || current.sessionId !== sessionId) return null;
-    this.setTreeAgent(null);
+    this.setTreeAgent(null, key);
+    this.forgetTreeAgentKey(key);
     return current;
   }
 
-  /** Live status of the background AI worker, or null when it is idle/gone. */
+  /** Live status of this checkout's background AI worker, or null when idle/gone. */
   treeAgentStatus() {
     const agent = this.getTreeAgent();
     if (!agent?.address) return null;
@@ -4687,15 +5146,40 @@ export default class GitGraph extends View {
     return term.status || null;
   }
 
-  /** True while the launched AI worker still owns the working tree. */
+  /** True while this checkout's launched AI worker still owns the working tree. */
   treeAgentBusy() {
-    if (this.treeAgentStarting) return true;
-    const agent = this.getTreeAgent();
+    const key = this.treeAgentKey();
+    if (this.treeAgentStartingKeys.has(key)) return true;
+    const agent = this.getTreeAgent(key);
     if (!agent) return false;
     // Once `hc run` returns, the worker keeps the button locked until its
     // session is done and the tree is clean (or its terminal is gone and the
     // finish check retires it).
     return true;
+  }
+
+  /**
+   * Whether another key is already cleaning the exact same checkout, such as a
+   * worker started before a reload under the bare key. Two agents on one
+   * working tree would race over the same files, so the second start is
+   * refused while the first one still runs.
+   *
+   * @param {string | null} root
+   * @param {string | null} on
+   * @returns {boolean}
+   */
+  treeAgentBusyElsewhere(root, on) {
+    const key = this.treeAgentKey();
+    const rootKey = normalizeCheckoutPath(root ?? "");
+    return this.treeAgentKeys().some((otherKey) => {
+      if (otherKey === key) return false;
+      const agent = this.getTreeAgent(otherKey);
+      return (
+        Boolean(agent) &&
+        normalizeCheckoutPath(agent.root ?? "") === rootKey &&
+        (agent.on ?? null) === (on ?? null)
+      );
+    });
   }
 
   /** The model the next run will use (explicit choice, else the free default). */
@@ -5216,6 +5700,20 @@ export default class GitGraph extends View {
   }
 
   /**
+   * A short repository name for the worker's toasts, so several spaces running
+   * at once never produce identical messages.
+   *
+   * @param {{ root?: string | null; name?: string }} agent
+   * @returns {string}
+   */
+  treeAgentWhere(agent) {
+    const parts = String(agent?.root || "")
+      .split(/[\\/]/)
+      .filter(Boolean);
+    return parts[parts.length - 1] || agent?.name || "repository";
+  }
+
+  /**
    * Shows the persistent progress toast while the AI worker runs. The GIF
    * icon spins natively and the toast stays up until `closeTreeAgentToast`,
    * so the person can see that the process is still happening.
@@ -5227,7 +5725,7 @@ export default class GitGraph extends View {
   showTreeAgentProgressToast(agent, model) {
     return notify({
       title: `${CLEAN_AGENT_LABEL} is cleaning the tree`,
-      body: `${cleanModelLabel(model)} · click to peek`,
+      body: `${this.treeAgentWhere(agent)} · ${cleanModelLabel(model)} · click to peek`,
       level: "info",
       icon: this.treeAgentSpinnerIcon(),
       timeout: CLEAN_AGENT_TOAST_TIMEOUT,
@@ -5254,18 +5752,36 @@ export default class GitGraph extends View {
   }
 
   /**
+   * Polls every space's worker. Each copy of the mod runs this timer, so a run
+   * that finishes while another space is selected still settles its toast and
+   * terminal instead of waiting for that space to be shown again.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
+   */
+  pollTreeAgents(cx) {
+    for (const key of this.treeAgentKeys()) {
+      const agent = this.getTreeAgent(key);
+      if (agent) this.pollTreeAgent(cx, key, agent);
+    }
+  }
+
+  /**
    * OpenCode Mini never reports OSC 7501 status, so poll its session. The
    * session is idle once `time.idle` is at or after `time.busy`. When it
    * settles, `checkTreeAgentFinished` decides whether the worker is done.
    *
-   * Polls the background AI commit agent session for status changes.
+   * Polls one space's background AI commit session for status changes.
    * Abandons hung requests after 30 s and ignores superseded poll generations.
    *
    * @param {import("./gpui-kit.js").Context} cx
+   * @param {string} key the space key that owns this worker
+   * @param {Record<string, any>} [agent]
    */
-  pollTreeAgent(cx) {
-    const agent = this.getTreeAgent();
+  pollTreeAgent(cx, key, agent = this.getTreeAgent(key)) {
     if (!agent?.sessionId) return;
+    // A failed run waits for a visible view of that checkout to offer the
+    // retry instead of being re-queried by hidden copies or other repositories.
+    if (agent.deferredStop && (key !== this.treeAgentKey() || !this.isViewVisible())) return;
     // Every open copy of the mod runs this timer, but only one may hold the
     // poll lease, so the session is queried once per interval, not once per copy.
     const now = Date.now();
@@ -5281,11 +5797,11 @@ export default class GitGraph extends View {
     if (!live && !agent.found && elapsed < 15000) return;
     if (!live || (!agent.found && elapsed > 30000)) {
       const gone = { ...agent, busy: false, idleSince: agent.idleSince || now };
-      this.checkTreeAgentFinished(cx, gone);
+      this.checkTreeAgentFinished(cx, gone, key);
       return;
     }
 
-    this.setTreeAgent({ ...agent, pollUntil: now + CLEAN_AGENT_POLL_LEASE_MS });
+    this.setTreeAgent({ ...agent, pollUntil: now + CLEAN_AGENT_POLL_LEASE_MS }, key);
     cx.spawn(async (cx) => {
       let settled = false;
       try {
@@ -5293,7 +5809,7 @@ export default class GitGraph extends View {
           cwd: agent.root,
           on: agent.on,
         });
-        if (this.getTreeAgent()?.sessionId !== agent.sessionId) return;
+        if (this.getTreeAgent(key)?.sessionId !== agent.sessionId) return;
         if (r.code !== 0) return;
         const payload = JSON.parse(r.stdout);
         const session = payload?.data ?? payload;
@@ -5305,7 +5821,7 @@ export default class GitGraph extends View {
         const error = failed && !agent.errorMessage ? await this.readTreeAgentError(agent) : {};
         // Re-read after the await: another copy may have claimed the worker
         // meanwhile, and writing back would revive it.
-        const latest = this.getTreeAgent();
+        const latest = this.getTreeAgent(key);
         if (latest?.sessionId !== agent.sessionId) return;
 
         const next = { ...latest, ...error, pollUntil: 0, found: true, busy };
@@ -5318,23 +5834,23 @@ export default class GitGraph extends View {
         } else if (latest.busy !== false) {
           next.idleSince = Date.now();
         }
-        this.setTreeAgent(next);
+        this.setTreeAgent(next, key);
         settled = true;
         cx.notify();
-        if (!busy) this.checkTreeAgentFinished(cx, next);
+        if (!busy) this.checkTreeAgentFinished(cx, next, key);
       } catch {
         // The API may not be available; the terminal-status fallback applies.
       } finally {
-        if (!settled) this.releaseTreeAgentPoll(agent.sessionId);
+        if (!settled) this.releaseTreeAgentPoll(agent.sessionId, key);
       }
     });
   }
 
   /** Clears this copy's poll lease after a poll that did not write its result. */
-  releaseTreeAgentPoll(sessionId) {
-    const latest = this.getTreeAgent();
+  releaseTreeAgentPoll(sessionId, key) {
+    const latest = this.getTreeAgent(key);
     if (latest?.sessionId === sessionId && latest.pollUntil) {
-      this.setTreeAgent({ ...latest, pollUntil: 0 });
+      this.setTreeAgent({ ...latest, pollUntil: 0 }, key);
     }
   }
 
@@ -5365,12 +5881,16 @@ export default class GitGraph extends View {
   }
 
   /**
-   * The session went idle (or the terminal ended). A clean tree means the
-   * worker did its job: report the new commits and close its tab. A dirty
+   * One space's session went idle (or its terminal ended). A clean tree means
+   * the worker did its job: report the new commits and close its tab. A dirty
    * tree with a dead terminal means it failed, so offer another model.
+   *
+   * @param {import("./gpui-kit.js").Context} cx
+   * @param {Record<string, any>} agent
+   * @param {string} key the space key that owns this worker
    */
-  checkTreeAgentFinished(cx, agent) {
-    if (this.getTreeAgent()?.sessionId !== agent.sessionId) return;
+  checkTreeAgentFinished(cx, agent, key) {
+    if (this.getTreeAgent(key)?.sessionId !== agent.sessionId) return;
     const term = terminals().find((t) => t.address === agent.address);
     const live = agent.address ? Boolean(term) && term.state === "live" : true;
     const idleMs = Date.now() - (agent.idleSince || agent.startedAt || Date.now());
@@ -5381,13 +5901,13 @@ export default class GitGraph extends View {
         (agent.busy === false && ((agent.sawBusy && idleMs >= 3000) || (!agent.sawBusy && idleMs >= 30000)))
       : true;
     if (!settled) return;
-    // Throttle and in-flight state are per copy: they only limit this copy's
-    // git calls. The shared claim below decides the outcome for all copies.
-    const last = this.treeAgentCheck;
-    if (this.treeAgentChecking) return;
-    if (last?.sessionId === agent.sessionId && Date.now() - last.at < 5000) return;
-    this.treeAgentCheck = { sessionId: agent.sessionId, at: Date.now() };
-    this.treeAgentChecking = true;
+    // Throttle and in-flight state are per copy and per worker: they only
+    // limit this copy's git calls. The shared claim below decides the outcome
+    // for every copy in that space.
+    const check = this.treeAgentChecks.get(key);
+    if (check?.inFlight) return;
+    if (check?.sessionId === agent.sessionId && Date.now() - check.at < 5000) return;
+    this.treeAgentChecks.set(key, { sessionId: agent.sessionId, at: Date.now(), inFlight: true });
 
     cx.spawn(async (cx) => {
       try {
@@ -5399,15 +5919,53 @@ export default class GitGraph extends View {
           [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"],
           { cwd: agent.root, on: agent.on }
         );
-        if (this.getTreeAgent()?.sessionId !== agent.sessionId) return;
+        if (this.getTreeAgent(key)?.sessionId !== agent.sessionId) return;
         if (status.code !== 0) return;
 
         if (status.stdout.trim()) {
           if (!live || agent.failed) {
+            // A hidden copy, or one showing another repository, cannot show
+            // the retry picker: stop the spinner and terminal, report the
+            // failure, and leave the retry for the visible view of this
+            // checkout.
+            if (key !== this.treeAgentKey() || !this.isViewVisible()) {
+              if (!agent.stopNotified) {
+                const error = agent.errorMessage ? {} : await this.readTreeAgentError(agent);
+                const detail =
+                  agent.errorMessage ||
+                  error.errorMessage ||
+                  (!live
+                    ? "The worker terminal exited before commits were completed."
+                    : "The AI model stopped before the tree was clean.");
+                const latest = this.getTreeAgent(key);
+                if (latest?.sessionId !== agent.sessionId) return;
+                this.closeTreeAgentToast(latest);
+                this.closeTreeAgentTab(latest);
+                this.setTreeAgent(
+                  {
+                    ...latest,
+                    ...error,
+                    errorMessage: latest.errorMessage || detail,
+                    toastId: null,
+                    deferredStop: true,
+                    stopNotified: true,
+                  },
+                  key
+                );
+                const isLimit =
+                  error.errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(detail || "");
+                notify({
+                  title: isLimit ? "AI usage limit reached" : "AI commit worker stopped",
+                  body: `${this.treeAgentWhere(agent)} · ${detail.slice(0, 300)} · Open its Git Graph to retry.`,
+                  level: "error",
+                });
+              }
+              return;
+            }
             // Claim first: a copy that loses the claim must not report the stop again.
-            const claimed = this.claimTreeAgent(agent.sessionId);
+            const claimed = this.claimTreeAgent(agent.sessionId, key);
             if (!claimed) return;
-            this.treeAgentStarting = false;
+            this.treeAgentStartingKeys.delete(key);
             this.closeTreeAgentToast(claimed);
             this.closeTreeAgentTab(claimed);
             this.reportTreeAgentStopped(cx, claimed, live);
@@ -5420,9 +5978,10 @@ export default class GitGraph extends View {
         const countArgs = from ? ["rev-list", "--count", `${from}..HEAD`] : ["rev-list", "--count", "HEAD"];
         const count = await exec("git", countArgs, { cwd: agent.root, on: agent.on });
         if (count.code === 0) commitCount = Number(count.stdout.trim()) || 0;
-        this.finishTreeAgent(agent, cx, commitCount);
+        this.finishTreeAgent(agent, cx, commitCount, key);
       } finally {
-        this.treeAgentChecking = false;
+        const latest = this.treeAgentChecks.get(key);
+        if (latest?.sessionId === agent.sessionId) latest.inFlight = false;
         cx.notify();
       }
     });
@@ -5452,11 +6011,13 @@ export default class GitGraph extends View {
       ? "The worker terminal exited before commits were completed."
       : "The AI model stopped before the tree was clean.";
 
-    notify({
-      title,
-      body: `${detail.slice(0, 300)} · Choose another model to continue.`,
-      level: "error",
-    });
+    if (!agent.stopNotified) {
+      notify({
+        title,
+        body: `${this.treeAgentWhere(agent)} · ${detail.slice(0, 300)} · Choose another model to continue.`,
+        level: "error",
+      });
+    }
     this.openCleanAgentModelPicker(
       cx,
       `${isLimit ? "⚠️ Usage limit reached: " : ""}${detail}\n\nChoose another model to retry.`
@@ -5478,23 +6039,26 @@ export default class GitGraph extends View {
   }
 
   /** The commits landed and the tree is clean: close the worker for good. */
-  finishTreeAgent(agent, cx, commitCount) {
+  finishTreeAgent(agent, cx, commitCount, key) {
     // Only the copy that wins the claim reports success; the rest stop here,
     // so one finished worker produces one toast no matter how many copies are open.
-    const claimed = this.claimTreeAgent(agent.sessionId);
+    const claimed = this.claimTreeAgent(agent.sessionId, key);
     if (!claimed) return;
-    this.treeAgentStarting = false;
+    this.treeAgentStartingKeys.delete(key);
     this.closeTreeAgentToast(claimed);
     this.closeTreeAgentTab(claimed);
     notify({
       title: "AI commit worker finished",
-      body:
+      body: `${this.treeAgentWhere(agent)} · ${
         commitCount > 0
           ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · background worker stopped`
-          : "Working tree is clean · background worker stopped",
+          : "Working tree is clean · background worker stopped"
+      }`,
       level: "success",
     });
-    this.refresh(cx);
+    // A copy showing that checkout refreshes it now; another repository's copy
+    // would only sweep its own tree, so leave that to the visible graph's timer.
+    if (key === this.treeAgentKey()) this.refresh(cx);
     cx.notify();
   }
 
@@ -5558,7 +6122,8 @@ export default class GitGraph extends View {
    * picker opens so the person can choose one.
    */
   startTreeAgent(cx, requestedModel = null) {
-    if (!this.root || this.treeAgentStarting) return;
+    const key = this.treeAgentKey();
+    if (!this.root || this.treeAgentStartingKeys.has(key)) return;
     if (this.treeAgentBusy()) return;
     if (this.detached) {
       notify({
@@ -5572,6 +6137,14 @@ export default class GitGraph extends View {
       notify({ title: "Working tree is clean", body: "There is nothing for the agent to commit.", level: "success" });
       return;
     }
+    if (this.treeAgentBusyElsewhere(this.root, this.on)) {
+      notify({
+        title: "Repository already being cleaned",
+        body: "Another space is running the AI commit worker on this same checkout.",
+        level: "warning",
+      });
+      return;
+    }
 
     const root = this.root;
     const on = this.on;
@@ -5579,7 +6152,8 @@ export default class GitGraph extends View {
     const name = this.treeAgentName();
     const sessionId = this.treeAgentSessionId();
 
-    this.treeAgentStarting = true;
+    this.treeAgentStartingKeys.add(key);
+    this.rememberTreeAgentKey(key);
     cx.notify();
 
     cx.spawn(async (cx) => {
@@ -5594,10 +6168,12 @@ export default class GitGraph extends View {
             body: "Install OpenCode to use the AI commit worker.",
             level: "warning",
           });
-          this.openCleanAgentModelPicker(
-            cx,
-            "OpenCode CLI is not installed. Install OpenCode to clean the working tree."
-          );
+          if (key === this.treeAgentKey()) {
+            this.openCleanAgentModelPicker(
+              cx,
+              "OpenCode CLI is not installed. Install OpenCode to clean the working tree."
+            );
+          }
           return;
         }
         const model = this.resolveCleanAgentModel(models, requestedModel);
@@ -5607,10 +6183,12 @@ export default class GitGraph extends View {
             body: "Choose a model for the AI commit worker.",
             level: "error",
           });
-          this.openCleanAgentModelPicker(
-            cx,
-            "No free model is available. Choose one of the available models to run the AI commit worker."
-          );
+          if (key === this.treeAgentKey()) {
+            this.openCleanAgentModelPicker(
+              cx,
+              "No free model is available. Choose one of the available models to run the AI commit worker."
+            );
+          }
           return;
         }
         this.treeAgentModel = model;
@@ -5658,7 +6236,7 @@ export default class GitGraph extends View {
           toastId: null,
         };
         agent.toastId = this.showTreeAgentProgressToast(agent, model);
-        this.setTreeAgent(agent);
+        this.setTreeAgent(agent, key);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         notify({
@@ -5666,9 +6244,10 @@ export default class GitGraph extends View {
           body: msg.length > 600 ? `${msg.slice(0, 600)}…` : msg,
           level: "error",
         });
-        this.openCleanAgentModelPicker(cx, msg);
+        if (key === this.treeAgentKey()) this.openCleanAgentModelPicker(cx, msg);
       } finally {
-        this.treeAgentStarting = false;
+        this.treeAgentStartingKeys.delete(key);
+        if (!this.getTreeAgent(key)) this.forgetTreeAgentKey(key);
         cx.notify();
       }
     });
@@ -5691,22 +6270,27 @@ export default class GitGraph extends View {
 
   /** One AI commit-worker button for the toolbar, beside the branch controls. */
   treeAgentButton(t, cx, isCompact) {
+    const starting = this.treeAgentStartingKeys.has(this.treeAgentKey());
     const status = this.treeAgentStatus();
     const busy = this.treeAgentBusy();
     const clean = !this.workingTreeFiles.length && !this.inProgressOp;
-    const hardDisabled = !this.root || clean || this.detached || this.busy;
-    const disabled = this.treeAgentStarting || (!busy && hardDisabled);
+    const elsewhere =
+      !starting && !busy && !clean && !this.detached && Boolean(this.root) && this.treeAgentBusyElsewhere(this.root, this.on);
+    const hardDisabled = !this.root || clean || this.detached || this.busy || elsewhere;
+    const disabled = starting || (!busy && hardDisabled);
     const showLabel = !isCompact && this.width >= 900;
     const model = cleanModelLabel(this.cleanAgentModelLabel());
-    const active = this.treeAgentStarting || busy;
+    const active = starting || busy;
 
     let tip;
-    if (this.treeAgentStarting) {
+    if (starting) {
       tip = `Starting ${CLEAN_AGENT_LABEL} with ${model}…`;
     } else if (busy && status === "blocked") {
       tip = `${CLEAN_AGENT_LABEL} is waiting for you (${model}) · click to peek`;
     } else if (busy) {
       tip = `${CLEAN_AGENT_LABEL} is cleaning the tree with ${model} · click to peek · right-click to change model`;
+    } else if (elsewhere) {
+      tip = "Another space is already cleaning this repository";
     } else if (!this.root) {
       tip = "Open a Git repository first";
     } else if (this.detached) {
@@ -5732,7 +6316,7 @@ export default class GitGraph extends View {
       .bg(color(disabled ? t.raised : t.accent + "1f"))
       .when(showLabel, (e) => e.px(7).gap(5))
       .when(!showLabel, (e) => e.w(23).justify_center())
-      .when(disabled, (e) => e.opacity(this.treeAgentStarting ? 0.75 : 0.4).cursor_not_allowed())
+      .when(disabled, (e) => e.opacity(starting ? 0.75 : 0.4).cursor_not_allowed())
       .when(!disabled, (e) => e.cursor_pointer().hover((s) => s.bg(color(t.hover))))
       .accessibility_label(`Clean tree with ${CLEAN_AGENT_LABEL}${disabled ? " (unavailable)" : ""}`)
       .tooltip(tip)
@@ -5761,7 +6345,7 @@ export default class GitGraph extends View {
             .text_size(11)
             .font_medium()
             .text_color(color(disabled ? t.dim : t.accent))
-            .child(this.treeAgentStarting ? "Starting…" : busy ? "Working…" : "Clean tree")
+            .child(starting ? "Starting…" : busy ? "Working…" : "Clean tree")
         )
       );
   }
@@ -5962,6 +6546,11 @@ export default class GitGraph extends View {
       const isRemote = ref.kind === "remote";
       const bName = ref.text;
       const isCurrent = !isRemote && bName === this.currentBranch;
+      // With the worktree-plus mod present, a branch checked out in another
+      // checkout switches to that checkout's space instead of running git checkout.
+      const spaceActions = this.spaceActionsAvailable === true;
+      const switchToSpace = spaceActions && !isRemote && !isCurrent ? findBranchCheckout(this.checkouts, bName, this.root) : null;
+      const isWorktreeBranch = spaceActions && !isRemote && worktreeBranchMap(this.checkouts).has(bName);
 
       return div()
         .id("context-menu-backdrop")
@@ -6008,6 +6597,10 @@ export default class GitGraph extends View {
                 .hover((s) => s.bg(color(t.hover)))
                 .on_click((_e, cx) => {
                   this.closeContextMenu(cx);
+                  if (switchToSpace) {
+                    this.switchToCheckoutSpace(switchToSpace, bName);
+                    return;
+                  }
                   this.busy = true;
                   cx.notify();
                   cx.spawn(async (cx) => {
@@ -6036,9 +6629,21 @@ export default class GitGraph extends View {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(svg("mods/git-graph/icons/commit.svg").size(12).text_color(color(t.dim)))
+                    .child(
+                      svg(switchToSpace ? "mods/git-graph/icons/worktree.svg" : "mods/git-graph/icons/commit.svg")
+                        .size(12)
+                        .text_color(color(t.dim))
+                    )
                 )
-                .child(div().child(`Checkout ${isRemote ? "Tracking Branch" : "Branch"}`))
+                .child(
+                  div().child(
+                    switchToSpace
+                      ? switchToSpace.main
+                        ? "Switch to Main Space"
+                        : "Switch to Worktree Space"
+                      : `Checkout ${isRemote ? "Tracking Branch" : "Branch"}`
+                  )
+                )
             )
             // Merge into current branch (the checked-out branch cannot merge itself)
             .child(
@@ -6159,7 +6764,11 @@ export default class GitGraph extends View {
                   .rounded(5)
                   .cursor_pointer()
                   .hover((s) => s.bg(color(t.hover)))
-                  .on_click((_e, cx) => this.openModal("confirm-delete-branch", { ref }, cx))
+                  .on_click((_e, cx) =>
+                    isWorktreeBranch
+                      ? this.startWorktreeBranchDelete(ref, cx)
+                      : this.openModal("confirm-delete-branch", { ref }, cx)
+                  )
                   .child(
                     div()
                       .w(14)
@@ -6170,7 +6779,11 @@ export default class GitGraph extends View {
                       .justify_center()
                       .child(svg("mods/git-graph/icons/trash.svg").size(12).text_color(color(t.ansi1)))
                   )
-                  .child(div().text_color(color(t.ansi1)).child("Delete Branch…"))
+                  .child(
+                    div()
+                      .text_color(color(t.ansi1))
+                      .child(isWorktreeBranch ? "Delete Branch and Worktree…" : "Delete Branch…")
+                  )
               )
             )
             // Delete remote branch
@@ -6259,6 +6872,90 @@ export default class GitGraph extends View {
                     .child(svg("mods/git-graph/icons/copy.svg").size(12).text_color(color(t.dim)))
                 )
                 .child(div().child("Copy Branch Name"))
+            )
+        );
+    }
+
+    if (cMenu.type === "file") {
+      const file = cMenu.file;
+      const path = file.path;
+      const absolutePath = resolveRepoPath(this.root, path);
+      const canShowFile = this.fileEditorAvailable === true;
+
+      return div()
+        .id("context-menu-backdrop")
+        .absolute()
+        .inset_0()
+        .on_mouse_down("left", (_e, cx) => this.closeContextMenu(cx))
+        .on_mouse_down("right", (_e, cx) => this.closeContextMenu(cx))
+        .child(
+          v_flex()
+            .id("file-context-menu")
+            .absolute()
+            .left(cMenu.x)
+            .top(cMenu.y)
+            .w(300)
+            .p(4)
+            .rounded(8)
+            .bg(color(t.popover))
+            .border_1()
+            .border_color(color(t.border))
+            .shadow_lg()
+            .text_size(11)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_mouse_down("right", (_e, cx) => cx.stop_propagation())
+            .child(
+              h_flex()
+                .px(8)
+                .py(4)
+                .gap(6)
+                .items_center()
+                .child(image(fileIconPath(file.name, isLightColor(t.background))).size(14).flex_none())
+                .child(div().flex_1().min_w(0).truncate().font_semibold().child(path))
+                .when(Boolean(file.status), (e) =>
+                  e.child(
+                    div()
+                      .flex_none()
+                      .font_semibold()
+                      .text_size(10)
+                      .text_color(color(getStatusColor(file.status, t)))
+                      .child(file.status)
+                  )
+                )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem("fmenu-show-diff", "Show Diff", "mods/git-graph/icons/file.svg", (cx) =>
+                this.openDiffTab(path, cx)
+              )
+            )
+            .child(
+              menuItem(
+                "fmenu-show-file",
+                "Show File",
+                "mods/git-graph/icons/open-file.svg",
+                (cx) => this.openFileInEditor(path, cx),
+                canShowFile ? null : FILE_EDITOR_INSTALL_HINT,
+                !canShowFile
+              )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem(
+                "fmenu-copy-path",
+                "Copy File Path",
+                "mods/git-graph/icons/copy.svg",
+                (cx) => {
+                  cx.write_to_clipboard(absolutePath);
+                  notify({
+                    title: "File path copied",
+                    body: absolutePath,
+                    level: "success",
+                    timeout: 1500,
+                  });
+                },
+                absolutePath
+              )
             )
         );
     }
@@ -6460,6 +7157,8 @@ export default class GitGraph extends View {
                           ? dialog.ref?.kind === "remote"
                             ? `Rename Remote Branch '${dialog.ref?.text}'`
                             : `Rename Branch '${dialog.ref?.text}'`
+                          : dialog.type === "confirm-delete-worktree-branch"
+                          ? `Delete Branch '${dialog.ref?.text}' and its Worktree`
                           : dialog.type === "confirm-delete-branch"
                           ? `Delete Branch '${dialog.ref?.text}'`
                           : dialog.type === "confirm-delete-remote-branch"
@@ -6543,6 +7242,8 @@ export default class GitGraph extends View {
                               ? ` and its remote branch '${dialog.counterpartText}'`
                               : ""
                           }`
+                      : dialog.type === "confirm-delete-worktree-branch"
+                      ? `Delete branch '${dialog.ref?.text}'? Its worktree at ${dialog.worktreePath} and the space showing it will be removed too.`
                       : dialog.type === "confirm-delete-branch"
                       ? `Permanently delete branch '${dialog.ref?.text}'`
                       : dialog.type === "confirm-delete-remote-branch"
@@ -6582,6 +7283,21 @@ export default class GitGraph extends View {
                 .text_size(10.5)
                 .text_color(color(t.ansi1))
                 .child("⚠️ Deleting a remote branch permanently removes it from the remote repository. This cannot be undone.")
+            )
+          )
+          .when(dialog.type === "confirm-delete-worktree-branch", (e) =>
+            e.child(
+              div()
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi1 + "18"))
+                .border_1()
+                .border_color(color(t.ansi1 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi1))
+                .child(
+                  "⚠️ The worktree is removed only if it has no uncommitted or untracked changes, and the branch only if it is fully merged. Its Herdr space closes first."
+                )
             )
           )
           .when(dialog.type === "confirm-checkout", (e) =>
@@ -7247,7 +7963,7 @@ export default class GitGraph extends View {
                   .bg(color(
                     dialog.type === "reset" && dialog.resetMode === "hard"
                       ? t.ansi1
-                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "drop-stash"
+                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "drop-stash"
                       ? t.ansi1
                       : t.solid
                   ))
@@ -7281,7 +7997,7 @@ export default class GitGraph extends View {
                         ? "Dropping…"
                         : dialog.type === "rename-branch"
                         ? "Renaming…"
-                        : dialog.type === "confirm-delete-remote-branch"
+                        : dialog.type === "confirm-delete-remote-branch" || dialog.type === "confirm-delete-worktree-branch"
                         ? "Deleting…"
                         : "Working…"
                       : dialog.type === "clean-model"
@@ -7322,6 +8038,8 @@ export default class GitGraph extends View {
                       ? "Rebase"
                       : dialog.type === "confirm-delete-remote-branch"
                       ? "Delete Remote Branch"
+                      : dialog.type === "confirm-delete-worktree-branch"
+                      ? "Delete Branch and Worktree"
                       : dialog.type === "confirm-delete-branch"
                       ? "Delete Branch"
                       : dialog.type === "rename-branch"

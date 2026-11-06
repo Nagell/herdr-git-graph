@@ -26,6 +26,10 @@ import {
   FILE_ICON_BY_EXT,
   FILE_ICON_DEFAULT,
   FOLDER_ICON_PATH,
+  FILE_EDITOR_MOD,
+  FILE_EDITOR_INSTALL_HINT,
+  fileEditorTabTarget,
+  resolveRepoPath,
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
@@ -35,6 +39,15 @@ import {
   renameRemoteBranchPushArgs,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
+  parseWorktreeList,
+  worktreeBranchMap,
+  findBranchCheckout,
+  markWorktreeRefs,
+  findCheckoutSpace,
+  mergedCheckArgs,
+  removeWorktreeArgs,
+  normalizeCheckoutPath,
+  SPACE_ACTIONS_MOD,
 } from "../mods/git-graph/git-logic.js";
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
@@ -820,6 +833,110 @@ test("fileIconPath: matches the file editor's Material Icon Theme pattern", () =
   assert.equal(FOLDER_ICON_PATH, "mods/git-graph/icons/folder-base.svg");
 });
 
+test("fileEditorTabTarget: reuses recorded editor tabs and derives unique names", () => {
+  assert.equal(FILE_EDITOR_MOD, "file-editor");
+  assert.match(FILE_EDITOR_INSTALL_HINT, /file-editor mod/);
+
+  // Reuses a live tab by its recorded id, refreshing the shared entry.
+  const byId = fileEditorTabTarget(
+    "/repo",
+    "src/app.js",
+    [
+      { id: "tab-1", name: "app.js" },
+      { id: "tab-2", name: "app.js (2)" },
+    ],
+    { "/repo/src/app.js": { root: "/repo", file: "src/app.js", tabId: "tab-2", tabName: "app.js (2)" } },
+    new Set(["tab-2"])
+  );
+  assert.equal(byId.existingTabId, "tab-2");
+  assert.equal(byId.tabName, "app.js (2)");
+  assert.deepEqual(byId.entry, {
+    root: "/repo",
+    file: "src/app.js",
+    tabId: "tab-2",
+    tabName: "app.js (2)",
+  });
+
+  // Falls back to the recorded name when the entry has no tab id yet.
+  const byName = fileEditorTabTarget(
+    "/repo",
+    "README.md",
+    [{ id: "tab-3", name: "README.md" }],
+    { "/repo/README.md": { root: "/repo", file: "README.md", tabName: "README.md" } },
+    ["tab-3"]
+  );
+  assert.equal(byName.existingTabId, "tab-3");
+  assert.equal(byName.entry.tabId, "tab-3");
+
+  // A same-named tab that is not the file editor must not be reused.
+  const wrongTab = fileEditorTabTarget(
+    "/repo",
+    "README.md",
+    [{ id: "terminal-1", name: "README.md" }],
+    { "/repo/README.md": { root: "/repo", file: "README.md", tabName: "README.md" } },
+    new Set(["editor-1"])
+  );
+  assert.equal(wrongTab.existingTabId, null);
+  assert.equal(wrongTab.tabName, "repo/README.md");
+  assert.equal(wrongTab.fileKey, "/repo/README.md");
+
+  // No collision keeps the basename.
+  const fresh = fileEditorTabTarget("/repo", "mods/git-graph/main.js", [], {}, new Set());
+  assert.equal(fresh.existingTabId, null);
+  assert.equal(fresh.tabName, "main.js");
+  assert.deepEqual(fresh.entry, { root: "/repo", file: "mods/git-graph/main.js", tabName: "main.js" });
+
+  // A basename collision prefers the containing directory, then the
+  // repository name, then a numeric suffix. Settled tabs do not reserve a name.
+  const relative = fileEditorTabTarget(
+    "/repo",
+    "src/lib/index.js",
+    [{ id: "tab-1", name: "index.js" }]
+  );
+  assert.equal(relative.tabName, "src/lib");
+
+  const rootName = fileEditorTabTarget(
+    "/repo",
+    "index.js",
+    [{ id: "tab-1", name: "index.js" }]
+  );
+  assert.equal(rootName.tabName, "repo/index.js");
+
+  const numbered = fileEditorTabTarget(
+    "/repo",
+    "index.js",
+    [
+      { id: "tab-1", name: "index.js" },
+      { id: "tab-2", name: "repo/index.js" },
+      { id: "tab-3", name: "repo/index.js (2)" },
+      { id: "tab-4", name: "repo/index.js (3)", settled: true },
+    ]
+  );
+  assert.equal(numbered.tabName, "repo/index.js (3)");
+
+  // Windows separators and trailing root slashes normalize to one shared key.
+  const windows = fileEditorTabTarget("C:\\repo\\", "src\\app.js", []);
+  assert.equal(windows.fileKey, "C:/repo/src/app.js");
+  assert.equal(windows.entry.file, "src/app.js");
+
+  // Missing targets are never opened.
+  assert.deepEqual(fileEditorTabTarget("/repo", "", []), {
+    existingTabId: null,
+    tabName: "File",
+    fileKey: "/repo/",
+    entry: null,
+  });
+});
+
+test("resolveRepoPath: joins repository-relative files without doubling separators", () => {
+  assert.equal(resolveRepoPath("/repo", "src/app.js"), "/repo/src/app.js");
+  assert.equal(resolveRepoPath("/repo/", "/src/app.js"), "/repo/src/app.js");
+  assert.equal(resolveRepoPath("C:\\repo\\", "src\\app.js"), "C:/repo/src/app.js");
+  assert.equal(resolveRepoPath("/repo", ""), "/repo");
+  assert.equal(resolveRepoPath("", "src/app.js"), "src/app.js");
+  assert.equal(resolveRepoPath(null, "src/app.js"), "src/app.js");
+});
+
 test("file icons: every mapped icon ships with the mod", () => {
   const iconsDir = new URL("../mods/git-graph/icons/", import.meta.url);
   const has = (name) => existsSync(fileURLToPath(new URL(`${name}.svg`, iconsDir)));
@@ -834,7 +951,7 @@ test("file icons: every mapped icon ships with the mod", () => {
     assert.ok(has(icon), `missing icon: ${icon}.svg`);
     assert.ok(has(`${icon}_light`), `missing light icon: ${icon}_light.svg`);
   }
-  for (const icon of [FILE_ICON_DEFAULT, "tune"]) {
+  for (const icon of [FILE_ICON_DEFAULT, "tune", "open-file"]) {
     assert.ok(has(icon), `missing icon: ${icon}.svg`);
   }
   assert.ok(has("folder-base"), "missing folder-base.svg");
@@ -878,4 +995,210 @@ test("extraRefsTooltip: joins extra refs formatted with badgeTooltip", () => {
     extraRefsTooltip(extra),
     "v1.0.0, feature/billing | origin/feature/billing, origin/legacy"
   );
+});
+
+// Porcelain text in the shape `git worktree list --porcelain` prints, including
+// the detached, prunable, and bare records that the parser must handle.
+const WORKTREE_PORCELAIN = [
+  "worktree /Users/me/code/app",
+  "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+  "branch refs/heads/main",
+  "",
+  "worktree /Users/me/.herdr/worktrees/app/feat-alpha",
+  "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+  "branch refs/heads/feat/alpha",
+  "",
+  "worktree /Users/me/.herdr/worktrees/app/review",
+  "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+  "detached",
+  "",
+  "worktree /Users/me/.herdr/worktrees/app/gone",
+  "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+  "branch refs/heads/feat/gone",
+  "prunable gitdir file points to non-existent location",
+  "",
+].join("\n");
+
+test("parseWorktreeList: main first, linked branches, detached, and prunable records", () => {
+  assert.deepEqual(parseWorktreeList(WORKTREE_PORCELAIN), [
+    { path: "/Users/me/code/app", branch: "main", main: true },
+    { path: "/Users/me/.herdr/worktrees/app/feat-alpha", branch: "feat/alpha", main: false },
+    { path: "/Users/me/.herdr/worktrees/app/review", branch: null, main: false },
+  ]);
+});
+
+test("parseWorktreeList: bare records are skipped and never count as the main checkout", () => {
+  const bare = [
+    "worktree /srv/git/app.git",
+    "bare",
+    "",
+    "worktree /srv/wt/main",
+    "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+    "branch refs/heads/main",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseWorktreeList(bare), [
+    { path: "/srv/wt/main", branch: "main", main: false },
+  ]);
+});
+
+test("parseWorktreeList: CRLF output, paths with spaces, locked records, and empty input", () => {
+  const crlf = [
+    "worktree /Users/me/My Projects/app",
+    "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+    "branch refs/heads/main",
+    "",
+    "worktree /Users/me/My Projects/wt",
+    "HEAD 2025dfd40e31010df85ab02bb51a19b8c1afa5c9",
+    "branch refs/heads/feat/x",
+    "locked",
+    "",
+  ].join("\r\n");
+  assert.deepEqual(parseWorktreeList(crlf), [
+    { path: "/Users/me/My Projects/app", branch: "main", main: true },
+    { path: "/Users/me/My Projects/wt", branch: "feat/x", main: false },
+  ]);
+  assert.deepEqual(parseWorktreeList(""), []);
+  assert.deepEqual(parseWorktreeList(undefined), []);
+});
+
+test("worktreeBranchMap and findBranchCheckout: only linked branches count as worktree branches", () => {
+  const checkouts = parseWorktreeList(WORKTREE_PORCELAIN);
+  const map = worktreeBranchMap(checkouts);
+  assert.equal(map.get("feat/alpha"), "/Users/me/.herdr/worktrees/app/feat-alpha");
+  assert.equal(map.has("main"), false, "the main checkout's branch is not a worktree branch");
+  assert.equal(map.size, 1);
+
+  // From the main checkout, a branch held by a linked worktree resolves to it.
+  assert.equal(
+    findBranchCheckout(checkouts, "feat/alpha", "/Users/me/code/app")?.path,
+    "/Users/me/.herdr/worktrees/app/feat-alpha"
+  );
+  // From a linked worktree, the main checkout's branch resolves to the main checkout.
+  assert.equal(
+    findBranchCheckout(checkouts, "main", "/Users/me/.herdr/worktrees/app/feat-alpha")?.main,
+    true
+  );
+  // The current root's own branch is not "held elsewhere", and unknown branches are not held.
+  assert.equal(findBranchCheckout(checkouts, "feat/alpha", "/Users/me/.herdr/worktrees/app/feat-alpha"), null);
+  assert.equal(findBranchCheckout(checkouts, "nope", "/Users/me/code/app"), null);
+  assert.equal(findBranchCheckout(checkouts, "", "/Users/me/code/app"), null);
+});
+
+test("markWorktreeRefs: flags only local display refs whose branch lives in a linked worktree", () => {
+  const checkouts = parseWorktreeList(WORKTREE_PORCELAIN);
+  const commits = markWorktreeRefs(
+    [
+      {
+        displayRefs: resolveDisplayRefs(
+          parseRefs("HEAD -> refs/heads/main, refs/heads/feat/alpha, refs/remotes/origin/feat/alpha, tag: refs/tags/v1")
+        ),
+      },
+    ],
+    checkouts
+  );
+  const byText = Object.fromEntries(commits[0].displayRefs.map((ref) => [ref.text, ref]));
+  assert.equal(byText["feat/alpha"].isWorktree, true);
+  assert.equal(byText["feat/alpha"].worktreePath, "/Users/me/.herdr/worktrees/app/feat-alpha");
+  assert.equal(byText["feat/alpha"].pairedRemote.text, "origin/feat/alpha");
+  assert.equal(byText.main.isWorktree, false);
+  assert.equal(byText.main.worktreePath, null);
+  assert.equal(byText["v1"].isWorktree, undefined, "tags are never marked");
+});
+
+test("badgeTooltip: a worktree branch says so and names its path", () => {
+  const path = "/Users/me/.herdr/worktrees/app/feat-alpha";
+  assert.equal(
+    badgeTooltip({ kind: "local", text: "feat/alpha", isWorktree: true, worktreePath: path }),
+    `feat/alpha · worktree branch at ${path}`
+  );
+  assert.equal(
+    badgeTooltip({
+      kind: "local",
+      text: "feat/alpha",
+      isWorktree: true,
+      worktreePath: path,
+      pairedRemote: { text: "origin/feat/alpha" },
+    }),
+    `feat/alpha | origin/feat/alpha · worktree branch at ${path}`
+  );
+  assert.equal(
+    badgeTooltip({ kind: "local", text: "feat/alpha", isWorktree: true, worktreePath: null }),
+    "feat/alpha · worktree branch"
+  );
+  // Plain branches keep their exact tooltip.
+  assert.equal(badgeTooltip({ kind: "local", text: "feat/alpha", isWorktree: false }), "feat/alpha");
+});
+
+test("findCheckoutSpace: matches the space whose terminal sits inside the checkout", () => {
+  const spaces = [
+    { id: "s-main", machine: null, tabs: [{ id: "t1" }], folder: "/code/app" },
+    { id: "s-alpha", machine: null, tabs: [{ id: "t2" }], folder: "/wt/app/alpha" },
+  ];
+  const panes = [
+    { tab: "t1", cwd: "/code/app" },
+    { tab: "t2", cwd: "/wt/app/alpha/src/deep" },
+  ];
+  assert.equal(findCheckoutSpace("/wt/app/alpha", spaces, panes, null)?.id, "s-alpha");
+  assert.equal(findCheckoutSpace("/code/app", spaces, panes, null)?.id, "s-main");
+  assert.equal(findCheckoutSpace("/wt/app/alpha/", spaces, panes, null)?.id, "s-alpha", "trailing slash");
+});
+
+test("findCheckoutSpace: a sibling that only shares a name prefix never matches", () => {
+  const spaces = [{ id: "s-wt2", machine: null, tabs: [{ id: "t1" }], folder: "/a/wt2" }];
+  const panes = [{ tab: "t1", cwd: "/a/wt2/src" }];
+  assert.equal(findCheckoutSpace("/a/wt", spaces, panes, null), null);
+  assert.equal(findCheckoutSpace("/a/wt2", spaces, panes, null)?.id, "s-wt2");
+});
+
+test("findCheckoutSpace: a nested checkout keeps the terminals inside it (deepest checkout wins)", () => {
+  const spaces = [{ id: "s-inner", machine: null, tabs: [{ id: "t1" }], folder: "/a/wt/inner" }];
+  const panes = [{ tab: "t1", cwd: "/a/wt/inner/x" }];
+  const checkoutPaths = ["/a/wt", "/a/wt/inner"];
+  assert.equal(findCheckoutSpace("/a/wt", spaces, panes, null, checkoutPaths), null);
+  assert.equal(findCheckoutSpace("/a/wt/inner", spaces, panes, null, checkoutPaths)?.id, "s-inner");
+});
+
+test("findCheckoutSpace: no space, machine mismatch, folder fallback, and Windows separators", () => {
+  const spaces = [{ id: "s-remote", machine: "box", tabs: [{ id: "t1" }], folder: "/srv/wt/app" }];
+  const panes = [{ tab: "t1", cwd: "/srv/wt/app" }];
+  assert.equal(findCheckoutSpace("/srv/wt/app", spaces, panes, null), null, "machine mismatch");
+  assert.equal(findCheckoutSpace("/srv/wt/app", spaces, panes, "box")?.id, "s-remote");
+  assert.equal(findCheckoutSpace("/elsewhere", spaces, panes, "box"), null, "no space holds it");
+  assert.equal(findCheckoutSpace("", spaces, panes, "box"), null);
+
+  // A space with no terminal yet falls back to the folder it was created in.
+  const folderOnly = [{ id: "s-folder", machine: null, tabs: [], folder: "/wt/app/beta" }];
+  assert.equal(findCheckoutSpace("/wt/app/beta", folderOnly, [], null)?.id, "s-folder");
+
+  const windows = [{ id: "s-win", machine: null, tabs: [{ id: "t1" }], folder: "C:\\wt\\app" }];
+  const winPanes = [{ tab: "t1", cwd: "C:\\wt\\app\\src" }];
+  assert.equal(findCheckoutSpace("C:/wt/app", windows, winPanes, null)?.id, "s-win");
+});
+
+test("mergedCheckArgs and removeWorktreeArgs: fully qualified refs, end-of-options, never forced", () => {
+  assert.deepEqual(mergedCheckArgs("feat/alpha"), [
+    "merge-base",
+    "--is-ancestor",
+    "--end-of-options",
+    "refs/heads/feat/alpha",
+    "HEAD",
+  ]);
+  // A name that starts with a dash is still spelled as a full ref, so it cannot be read as an option.
+  assert.equal(mergedCheckArgs("-rf")[3], "refs/heads/-rf");
+
+  assert.deepEqual(removeWorktreeArgs("/wt/app/alpha"), [
+    "worktree",
+    "remove",
+    "--end-of-options",
+    "/wt/app/alpha",
+  ]);
+  assert.equal(removeWorktreeArgs("/wt/app/alpha").includes("--force"), false);
+});
+
+test("normalizeCheckoutPath and SPACE_ACTIONS_MOD", () => {
+  assert.equal(normalizeCheckoutPath("C:\\wt\\app\\"), "C:/wt/app");
+  assert.equal(normalizeCheckoutPath("/wt/app//"), "/wt/app");
+  assert.equal(normalizeCheckoutPath(null), "");
+  assert.equal(SPACE_ACTIONS_MOD, "worktree-plus");
 });

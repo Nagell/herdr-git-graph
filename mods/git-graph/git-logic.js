@@ -313,6 +313,123 @@ export function fileIconPath(fileName, light = false) {
   return `mods/git-graph/icons/${variant}.svg`;
 }
 
+/** Herdr mod that renders a file in its own tab. */
+export const FILE_EDITOR_MOD = "file-editor";
+
+/** Message shown when the file-editor mod is not installed. */
+export const FILE_EDITOR_INSTALL_HINT =
+  "Install the file-editor mod to open files in the editor.";
+
+/**
+ * Resolves the tab that should show a file in the file-editor mod.
+ *
+ * Reuses the live file-editor tab recorded in `shared("file-editor.openTabs")`
+ * when it still exists. Otherwise derives a collision-free tab name following
+ * the file-editor naming rules (base name, then containing directory or
+ * repository name, then a numeric suffix), so both mods agree on which tab
+ * belongs to which file.
+ *
+ * @param {string | null | undefined} root
+ * @param {string | null | undefined} file
+ * @param {Array<{ id: string, name: string, settled?: boolean }>} [activeTabs=[]]
+ * @param {Record<string, { tabId?: string, tabName?: string, root?: string | null, file?: string }>} [openTabs={}]
+ * @param {Set<string> | string[] | null} [fileEditorTabIds=null] Live tab ids known to host the file-editor mod.
+ * @returns {{ existingTabId: string | null, tabName: string, fileKey: string, entry: Record<string, any> | null }}
+ */
+export function fileEditorTabTarget(
+  root,
+  file,
+  activeTabs = [],
+  openTabs = {},
+  fileEditorTabIds = null
+) {
+  const normFile = typeof file === "string" ? file.replace(/\\/g, "/").replace(/^\/+/, "") : "";
+  const normRoot = typeof root === "string" ? root.replace(/\\/g, "/").replace(/\/+$/, "") : "";
+  const fileKey = normRoot ? `${normRoot}/${normFile}` : normFile;
+
+  if (!normFile) {
+    return { existingTabId: null, tabName: "File", fileKey, entry: null };
+  }
+
+  const liveTabs = Array.isArray(activeTabs)
+    ? activeTabs.filter((tab) => tab && !tab.settled)
+    : [];
+  const editorIds =
+    fileEditorTabIds instanceof Set
+      ? fileEditorTabIds
+      : new Set(Array.isArray(fileEditorTabIds) ? fileEditorTabIds : []);
+  const isFileEditorTab = (tab) => editorIds.size === 0 || editorIds.has(tab.id);
+  const map = openTabs && typeof openTabs === "object" ? openTabs : {};
+  const recorded = map[fileKey];
+
+  if (recorded && typeof recorded === "object") {
+    const matched = liveTabs.find((tab) => {
+      if (!isFileEditorTab(tab)) return false;
+      if (typeof recorded.tabId === "string" && recorded.tabId.length > 0) {
+        return tab.id === recorded.tabId;
+      }
+      return (
+        typeof recorded.tabName === "string" &&
+        recorded.tabName.length > 0 &&
+        tab.name === recorded.tabName
+      );
+    });
+    if (matched) {
+      return {
+        existingTabId: matched.id,
+        tabName: matched.name,
+        fileKey,
+        entry: {
+          ...recorded,
+          root: normRoot || null,
+          file: normFile,
+          tabId: matched.id,
+          tabName: matched.name,
+        },
+      };
+    }
+  }
+
+  const base = normFile.split("/").pop() || "File";
+  const hasCollision = (name) => liveTabs.some((tab) => tab.name === name);
+  let tabName = base;
+
+  if (hasCollision(tabName)) {
+    const dir = normFile.includes("/") ? normFile.slice(0, normFile.lastIndexOf("/")) : "";
+    const rootBase = normRoot.split("/").filter(Boolean).pop() || "";
+    const candidate = dir || (rootBase ? `${rootBase}/${base}` : base);
+    if (!hasCollision(candidate)) {
+      tabName = candidate;
+    } else {
+      let n = 2;
+      while (hasCollision(`${candidate} (${n})`)) n++;
+      tabName = `${candidate} (${n})`;
+    }
+  }
+
+  return {
+    existingTabId: null,
+    tabName,
+    fileKey,
+    entry: { root: normRoot || null, file: normFile, tabName },
+  };
+}
+
+/**
+ * Builds the absolute path of a repository-relative file. Separators are
+ * normalized to forward slashes, and a trailing root slash is not doubled.
+ *
+ * @param {string | null | undefined} root
+ * @param {string | null | undefined} file
+ * @returns {string}
+ */
+export function resolveRepoPath(root, file) {
+  const normRoot = typeof root === "string" ? root.replace(/\\/g, "/").replace(/\/+$/, "") : "";
+  const normFile = typeof file === "string" ? file.replace(/\\/g, "/").replace(/^\/+/, "") : "";
+  if (!normRoot) return normFile;
+  return normFile ? `${normRoot}/${normFile}` : normRoot;
+}
+
 /**
  * Parses decorated ref strings produced by `git log --decorate=full --format=%D`.
  * Correctly distinguishes local branches with slashes (e.g. refs/heads/feat/foo)
@@ -460,16 +577,20 @@ export function resolveDisplayRefs(refs) {
 }
 
 /**
- * Computes the full text tooltip for a ref badge.
+ * Computes the full text tooltip for a ref badge. A branch checked out in a
+ * linked worktree says so and names that checkout's path.
  *
- * @param {{ kind?: string, text?: string, pairedRemote?: { text: string } }} ref
+ * @param {{ kind?: string, text?: string, pairedRemote?: { text: string }, isWorktree?: boolean, worktreePath?: string | null }} ref
  * @returns {string}
  */
 export function badgeTooltip(ref) {
   if (!ref) return "";
   if (ref.kind === "head") return "HEAD";
-  if (ref.pairedRemote) return `${ref.text} | ${ref.pairedRemote.text}`;
-  return ref.text || "";
+  const label = ref.pairedRemote ? `${ref.text} | ${ref.pairedRemote.text}` : ref.text || "";
+  if (!ref.isWorktree) return label;
+  return ref.worktreePath
+    ? `${label} · worktree branch at ${ref.worktreePath}`
+    : `${label} · worktree branch`;
 }
 
 /**
@@ -979,6 +1100,178 @@ export function fetchRemoteBranchArgs(remote, branch) {
 export function renameRemoteBranchPushArgs(remote, oldBranch, newBranch) {
   const source = `refs/remotes/${remote}/${oldBranch}`;
   return ["push", remote, "--end-of-options", `${source}:refs/heads/${newBranch}`];
+}
+
+// --- Git worktrees ------------------------------------------------------
+
+/**
+ * Optional Herdr mod (space-actions repo) that owns worktree create, open, and
+ * remove. Worktree switching and removal appear only while its manifest exists.
+ */
+export const SPACE_ACTIONS_MOD = "worktree-plus";
+
+/**
+ * Normalises a checkout path for comparison: forward slashes and no trailing
+ * slash, so the same folder compares equal however it was spelled.
+ *
+ * @param {string | null | undefined} path
+ * @returns {string}
+ */
+export function normalizeCheckoutPath(path) {
+  return String(path ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Parses `git worktree list --porcelain`. Records are separated by blank lines
+ * and each starts with a `worktree <path>` line. Bare and prunable records are
+ * skipped, but the first record is always the main checkout, so a linked
+ * checkout is never mistaken for it.
+ *
+ * @param {string} stdout
+ * @returns {Array<{ path: string, branch: string | null, main: boolean }>}
+ */
+export function parseWorktreeList(stdout) {
+  /** @type {Array<{ path: string, branch: string | null, bare: boolean, prunable: boolean }>} */
+  const records = [];
+  let current = null;
+  for (const line of String(stdout ?? "").split(/\r?\n/)) {
+    if (line === "") {
+      current = null;
+    } else if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length), branch: null, bare: false, prunable: false };
+      records.push(current);
+    } else if (current) {
+      if (line === "bare") current.bare = true;
+      else if (line === "prunable" || line.startsWith("prunable ")) current.prunable = true;
+      else if (line.startsWith("branch ")) {
+        current.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+      }
+    }
+  }
+  /** @type {Array<{ path: string, branch: string | null, main: boolean }>} */
+  const checkouts = [];
+  records.forEach((record, index) => {
+    if (record.bare || record.prunable || !record.path) return;
+    checkouts.push({ path: record.path, branch: record.branch, main: index === 0 });
+  });
+  return checkouts;
+}
+
+/**
+ * Maps each local branch checked out in a linked worktree to that checkout's
+ * path. The main checkout is left out: its branch is an ordinary branch.
+ *
+ * @param {Array<{ path: string, branch: string | null, main: boolean }>} checkouts
+ * @returns {Map<string, string>}
+ */
+export function worktreeBranchMap(checkouts) {
+  const branches = new Map();
+  for (const checkout of checkouts ?? []) {
+    if (!checkout.main && checkout.branch) branches.set(checkout.branch, checkout.path);
+  }
+  return branches;
+}
+
+/**
+ * Finds the checkout, other than the current root, that holds a local branch.
+ * Returns null when no other checkout has it.
+ *
+ * @param {Array<{ path: string, branch: string | null, main: boolean }>} checkouts
+ * @param {string} branch
+ * @param {string | null | undefined} currentRoot
+ * @returns {{ path: string, branch: string | null, main: boolean } | null}
+ */
+export function findBranchCheckout(checkouts, branch, currentRoot) {
+  if (!branch) return null;
+  const here = normalizeCheckoutPath(currentRoot);
+  return (
+    (checkouts ?? []).find(
+      (checkout) => checkout.branch === branch && normalizeCheckoutPath(checkout.path) !== here
+    ) ?? null
+  );
+}
+
+/**
+ * Sets `isWorktree` and `worktreePath` on every local display ref whose branch
+ * is checked out in a linked worktree. The refs are created per parse, so they
+ * are updated in place and the badge renderer and tooltip read the flags.
+ *
+ * @param {Array<any>} commits
+ * @param {Array<{ path: string, branch: string | null, main: boolean }>} checkouts
+ * @returns {Array<any>} the same commits
+ */
+export function markWorktreeRefs(commits, checkouts) {
+  const branches = worktreeBranchMap(checkouts);
+  for (const commit of commits ?? []) {
+    for (const ref of commit.displayRefs ?? []) {
+      if (ref.kind !== "local") continue;
+      const path = branches.get(ref.text);
+      ref.isWorktree = path !== undefined;
+      ref.worktreePath = path ?? null;
+    }
+  }
+  return commits;
+}
+
+/**
+ * Finds the Herdr space that shows a checkout. A space matches when its first
+ * terminal (or, without one, its folder) sits inside the checkout path on the
+ * same machine. A checkout nested inside this one keeps the terminals in it, and
+ * a sibling that only shares a name prefix (/a/wt2 for /a/wt) never matches.
+ *
+ * @param {string} checkoutPath
+ * @param {Array<any>} spaceList spaces() entries: { id, machine, tabs, folder }
+ * @param {Array<any>} paneList panes() entries: { tab, cwd }
+ * @param {string | null | undefined} on machine the repository lives on (null for this machine)
+ * @param {string[]} [checkoutPaths=[]] every checkout path of the repository, to resolve nesting
+ * @returns {any | null} the matching space, or null
+ */
+export function findCheckoutSpace(checkoutPath, spaceList, paneList, on, checkoutPaths = []) {
+  const target = normalizeCheckoutPath(checkoutPath);
+  if (!target) return null;
+  const within = (path, dir) => path === dir || path.startsWith(dir + "/");
+  const nested = (checkoutPaths ?? [])
+    .map(normalizeCheckoutPath)
+    .filter((path) => path !== target && within(path, target));
+  const machine = on ?? null;
+  const placeOf = (space) => {
+    const tabIds = new Set((space.tabs ?? []).map((tab) => tab.id));
+    const pane = (paneList ?? []).find((p) => tabIds.has(p.tab) && p.cwd);
+    return normalizeCheckoutPath(pane ? pane.cwd : space.folder);
+  };
+  return (
+    (spaceList ?? []).find((space) => {
+      if ((space.machine ?? null) !== machine) return false;
+      const at = placeOf(space);
+      if (!at || !within(at, target)) return false;
+      return !nested.some((dir) => within(at, dir));
+    }) ?? null
+  );
+}
+
+/**
+ * Builds the check that decides whether a local branch is fully merged into
+ * HEAD. Git exits 0 when it is merged and 1 when it is not; any other code means
+ * the check itself failed. The ref is spelled out in full so a branch name can
+ * never be read as an option.
+ *
+ * @param {string} branch
+ * @returns {string[]}
+ */
+export function mergedCheckArgs(branch) {
+  return ["merge-base", "--is-ancestor", "--end-of-options", `refs/heads/${branch}`, "HEAD"];
+}
+
+/**
+ * Builds `git worktree remove` for one linked checkout. It is never forced: git
+ * refuses a checkout with local changes, untracked files, or submodules, and the
+ * caller keeps its dialog open with that error.
+ *
+ * @param {string} path
+ * @returns {string[]}
+ */
+export function removeWorktreeArgs(path) {
+  return ["worktree", "remove", "--end-of-options", path];
 }
 
 // --- Diff syntax highlighting -------------------------------------------
