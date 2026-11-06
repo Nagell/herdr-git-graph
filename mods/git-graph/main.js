@@ -6132,9 +6132,15 @@ export default class GitGraph extends View {
       "Read the repository's AGENTS.md, CLAUDE.md, and CONTRIBUTING.md first and follow them.",
       "Load and follow the @git-change-workflow skill for commit slicing and Conventional Commit messages. This task is an explicit exception to its branch rule: commit on the current branch.",
       "If a merge, rebase, cherry-pick, or revert is in progress, understand and resolve every conflict, stage the resolutions, and complete the operation non-interactively with `git -c core.editor=true merge --continue` (or rebase/cherry-pick/revert --continue). Always pass -m to git commit.",
-      "Then split the remaining changes into cohesive atomic commits, staging only the files that belong to each commit. Validate each slice when the repository has a quick check.",
+      "Before the first commit, inspect the full diff and plan the slices: each slice is one logical change that can be reviewed, reverted, or cherry-picked alone.",
+      "Stage only the hunks that belong to one slice. A file is not a slice: when a file mixes concerns (for example, a UI file touched by several features), use `git add -p` or split its diff and `git apply --cached`. Never commit a file that contains more than one independent change.",
+      "Keep each feature's integration hunks in its own commit; do not defer all integration to a final 'UI' commit.",
+      "Example: if one file contains sticky scrolling, visibility checks, and model controls, that is three commits, not one; include the related imports and call sites in each.",
+      "If a commit subject needs 'and' to name two unrelated features, or the staged diff needs two summaries, split it. Keep the subject at 72 characters or fewer.",
+      "Validate each slice with the repository's quick check before committing it; do not reuse a test run from before the commits.",
       "Never run git push or any remote-writing command. Do not fetch, force-push, rewrite history, reset --hard, or discard user work. Do not run git clean or amend existing commits.",
       "Do not run sync.sh, herdr-app, or touch ~/.config/herdr-app: herdr-git-graph manages synchronization and UI lifecycle automatically.",
+      "Before reporting success, review every new commit with `git log --stat` and confirm no commit mixes unrelated concerns. If one does, do not rewrite history; report exactly which commit and why.",
       "When done, report the commits you created and confirm the working tree is clean. If there is nothing to commit and no operation to finish, say so and stop.",
     ]
       .filter(Boolean)
