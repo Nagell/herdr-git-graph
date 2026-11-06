@@ -2364,6 +2364,63 @@ export function filterVisibleCleanModels(models, { provider = null, query = "", 
   return list;
 }
 
+/**
+ * Parses `git log --format=%H%x1f%s --numstat --no-renames` into per-commit
+ * line counts. Binary files (`-\t-`) count as a changed file with zero lines.
+ *
+ * @param {string} stdout
+ * @returns {Array<{ hash: string, subject: string, files: number, added: number, deleted: number, changed: number }>}
+ */
+export function parseCommitStats(stdout) {
+  const commits = [];
+  let current = null;
+  for (const raw of String(stdout || "").split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (!line) continue;
+    const sep = line.indexOf("\x1f");
+    if (sep !== -1) {
+      current = {
+        hash: line.slice(0, sep),
+        subject: line.slice(sep + 1),
+        files: 0,
+        added: 0,
+        deleted: 0,
+        changed: 0,
+      };
+      commits.push(current);
+      continue;
+    }
+    if (!current) continue;
+    const [addedRaw, deletedRaw] = line.split("\t");
+    const added = addedRaw === "-" ? 0 : Number(addedRaw);
+    const deleted = deletedRaw === "-" ? 0 : Number(deletedRaw);
+    if (!Number.isFinite(added) || !Number.isFinite(deleted)) continue;
+    current.files += 1;
+    current.added += added;
+    current.deleted += deleted;
+    current.changed += added + deleted;
+  }
+  return commits;
+}
+
+/**
+ * Returns the largest commit when its changed-line count crosses `threshold`.
+ * A worker that bundles several features into one file produces one such
+ * commit; the finish toast then asks the person to review it instead of
+ * claiming the history is atomic.
+ *
+ * @param {string} stdout
+ * @param {number} [threshold=1000]
+ * @returns {{ hash: string, subject: string, files: number, added: number, deleted: number, changed: number } | null}
+ */
+export function findLargeCommit(stdout, threshold = 1000) {
+  let largest = null;
+  for (const commit of parseCommitStats(stdout)) {
+    if (!largest || commit.changed > largest.changed) largest = commit;
+  }
+  return largest && largest.changed >= threshold ? largest : null;
+}
+
 /** Official OpenCode CLI install command from https://opencode.ai/docs/ */
 export const OPENCODE_INSTALL_CMD = "curl -fsSL https://opencode.ai/install | bash";
 

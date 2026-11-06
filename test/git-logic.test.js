@@ -35,6 +35,8 @@ import {
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
+  parseCommitStats,
+  findLargeCommit,
   splitRemoteBranch,
   deleteRemoteBranchArgs,
   fetchRemoteBranchArgs,
@@ -1274,4 +1276,59 @@ test("normalizeCheckoutPath and SPACE_ACTIONS_MOD", () => {
   assert.equal(normalizeCheckoutPath("/wt/app//"), "/wt/app");
   assert.equal(normalizeCheckoutPath(null), "");
   assert.equal(SPACE_ACTIONS_MOD, "worktree-plus");
+});
+
+test("parseCommitStats: sums numstat lines and treats binary files as zero lines", () => {
+  const log = [
+    "abc123\x1ffeat: add first slice",
+    "10\t2\tmods/git-graph/main.js",
+    "-\t-\ticons/logo.png",
+    "",
+    "def456\x1ffix: correct second slice",
+    "3\t5\tmods/git-graph/git-logic.js",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(parseCommitStats(log), [
+    {
+      hash: "abc123",
+      subject: "feat: add first slice",
+      files: 2,
+      added: 10,
+      deleted: 2,
+      changed: 12,
+    },
+    {
+      hash: "def456",
+      subject: "fix: correct second slice",
+      files: 1,
+      added: 3,
+      deleted: 5,
+      changed: 8,
+    },
+  ]);
+
+  const crlf = parseCommitStats("abc123\x1ffeat: crlf\r\n4\t1\tfile.js\r\n");
+  assert.equal(crlf[0].subject, "feat: crlf");
+  assert.equal(crlf[0].changed, 5);
+});
+
+test("findLargeCommit: returns the largest commit only when it crosses the threshold", () => {
+  const log = [
+    "aaa111\x1ffeat: small slice",
+    "500\t100\tmods/git-graph/main.js",
+    "",
+    "bbb222\x1ffeat: bundled slice",
+    "1700\t400\tmods/git-graph/main.js",
+    "",
+  ].join("\n");
+
+  const large = findLargeCommit(log, 1000);
+  assert.equal(large?.hash, "bbb222");
+  assert.equal(large?.changed, 2100);
+  assert.equal(findLargeCommit(log, 2500), null);
+
+  const smallOnly = "ccc333\x1ffeat: single file\n20\t5\tmods/git-graph/main.js\n";
+  assert.equal(findLargeCommit(smallOnly, 1000), null);
+  assert.equal(findLargeCommit("", 1000), null);
 });

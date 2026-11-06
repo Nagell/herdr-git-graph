@@ -70,6 +70,7 @@ import {
   cleanModelLabel,
   resolveCleanAgentModelLogic,
   filterVisibleCleanModels,
+  findLargeCommit,
   splitRemoteBranch,
   deleteRemoteBranchArgs,
   fetchRemoteBranchArgs,
@@ -128,6 +129,10 @@ const CLEAN_AGENT_WORKER_KEY = "git-graph.activeTreeAgent";
 // even when no view of that checkout is open.
 const CLEAN_AGENT_WORKER_KEYS_KEY = "git-graph.activeTreeAgentKeys";
 const CLEAN_AGENT_LABEL = "AI commit worker";
+// A new commit above this many changed lines is worth a second look: the
+// worker may have bundled several features into one file instead of slicing
+// the hunks. The finish toast names it for review instead of claiming success.
+const CLEAN_AGENT_LARGE_COMMIT_LINES = 1000;
 // How long one copy of the mod holds the shared poll lease (milliseconds).
 // Longer than a slow `opencode api` call, shorter than a stalled poll's wait.
 const CLEAN_AGENT_POLL_LEASE_MS = 30 * 1000;
@@ -5974,11 +5979,20 @@ export default class GitGraph extends View {
         }
 
         let commitCount = 0;
+        let largeCommit = null;
         const from = agent.headBefore;
         const countArgs = from ? ["rev-list", "--count", `${from}..HEAD`] : ["rev-list", "--count", "HEAD"];
         const count = await exec("git", countArgs, { cwd: agent.root, on: agent.on });
         if (count.code === 0) commitCount = Number(count.stdout.trim()) || 0;
-        this.finishTreeAgent(agent, cx, commitCount, key);
+        if (commitCount > 0 && from) {
+          const stats = await exec(
+            "git",
+            [...READ, "log", "--format=%H%x1f%s", "--numstat", "--no-renames", `${from}..HEAD`],
+            { cwd: agent.root, on: agent.on }
+          );
+          if (stats.code === 0) largeCommit = findLargeCommit(stats.stdout, CLEAN_AGENT_LARGE_COMMIT_LINES);
+        }
+        this.finishTreeAgent(agent, cx, commitCount, key, largeCommit);
       } finally {
         const latest = this.treeAgentChecks.get(key);
         if (latest?.sessionId === agent.sessionId) latest.inFlight = false;
@@ -6038,8 +6052,16 @@ export default class GitGraph extends View {
     }
   }
 
-  /** The commits landed and the tree is clean: close the worker for good. */
-  finishTreeAgent(agent, cx, commitCount, key) {
+  /**
+   * The commits landed and the tree is clean: close the worker for good.
+   *
+   * @param {Record<string, any>} agent the claimed worker
+   * @param {import("./gpui-kit.js").Context} cx
+   * @param {number} commitCount new commits since `agent.headBefore`
+   * @param {string} key the worker's checkout key
+   * @param {{ hash: string, added: number, deleted: number, changed: number } | null} [largeCommit] a new commit that may bundle unrelated changes
+   */
+  finishTreeAgent(agent, cx, commitCount, key, largeCommit = null) {
     // Only the copy that wins the claim reports success; the rest stop here,
     // so one finished worker produces one toast no matter how many copies are open.
     const claimed = this.claimTreeAgent(agent.sessionId, key);
@@ -6047,14 +6069,19 @@ export default class GitGraph extends View {
     this.treeAgentStartingKeys.delete(key);
     this.closeTreeAgentToast(claimed);
     this.closeTreeAgentTab(claimed);
+    const large = largeCommit && largeCommit.changed >= CLEAN_AGENT_LARGE_COMMIT_LINES ? largeCommit : null;
+    const countText =
+      commitCount > 0
+        ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · background worker stopped`
+        : "Working tree is clean · background worker stopped";
     notify({
-      title: "AI commit worker finished",
-      body: `${this.treeAgentWhere(agent)} · ${
-        commitCount > 0
-          ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · background worker stopped`
-          : "Working tree is clean · background worker stopped"
+      title: large ? "AI commit worker finished · review large commit" : "AI commit worker finished",
+      body: `${this.treeAgentWhere(agent)} · ${countText}${
+        large
+          ? ` · ${large.hash.slice(0, 7)} changed ${large.changed} lines — it may bundle unrelated changes`
+          : ""
       }`,
-      level: "success",
+      level: large ? "warning" : "success",
     });
     // A copy showing that checkout refreshes it now; another repository's copy
     // would only sweep its own tree, so leave that to the visible graph's timer.
