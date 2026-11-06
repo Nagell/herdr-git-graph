@@ -43,6 +43,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - The agent resolves merge/rebase/cherry-pick/revert conflicts, completes the operation, and turns the remaining changes into atomic Conventional Commits using the `git-change-workflow` skill.
   - It works on the current branch only and is explicitly told never to push, fetch, force-push, rewrite history, or discard work. The button disables when the tree is clean, HEAD is detached, or the launched agent is still running; the toast opens its terminal.
   - Starting it keeps a spinning progress toast on screen for the whole run; the toast is dismissed when the worker settles.
+  - Workers are independent per checkout, so every space can clean its own repository at the same time; views of the same checkout share one worker and a second start is refused while it runs.
   - When the commits land and the tree is clean, the progress toast is dismissed and a success toast reports how many commits were created.
 - **Stash Rows**:
   - Every `git stash` entry renders above the working tree as its own row: hollow stash node, `stash@{n}` pill, reflog subject, relative date, author, and stash commit.
@@ -58,6 +59,8 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - A fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder.
   - Nested folders with indentation guide lines, chevrons, and the Material folder icon.
   - Full-color Material Icon Theme icons per file, chosen by exact name or extension (`fileIconPath` in `git-logic.js`), with `_light` variants on light themes — the same icon pattern as the File Editor mod.
+  - Hovering a file reveals an **Open in file editor** button beside its name. It opens the current file in the optional `file-editor` mod, reuses that mod's live tab, and keeps the slot reserved so file names never shift. Without the mod the button is disabled and explains how to enable the feature.
+  - Right-clicking a file row opens its context menu: **Show Diff**, **Show File**, and **Copy File Path**. Show File is disabled with the install hint when `file-editor` is missing; Copy File Path copies the absolute path.
   - Porcelain status letters on the right: Added (green/`ansi2`), Deleted (red/`ansi1`), Modified (blue/`ansi4`), Conflict (yellow/`ansi3`).
   - Colored per-file `+added` / `−deleted` counts beside the status letter (green/red); untracked files also show `+N` by counting their lines. The hover tooltip keeps the full path and status label.
   - The details pane below the graph is resizable: drag the divider to change how much of the panel belongs to the commit list and how much to the changed-file tree.
@@ -218,3 +221,14 @@ To publish `git-graph` to the Herdr marketplace (`herdr.dev/mods`):
    ```sh
    gh repo view --json visibility,repositoryTopics,defaultBranchRef
    ```
+
+## Git worktrees
+
+A branch checked out in a linked worktree (`git worktree add`) gets a worktree icon, a `worktree` chip, and the `ansi6` colour on its badge. Its tooltip names the checkout path.
+
+When the optional `worktree-plus` mod from `herdr-space-actions` is installed, the branch menu also offers:
+
+- **Switch to Worktree Space** (or **Switch to Main Space**) selects the Herdr space that shows that checkout, or opens one. No `git checkout` runs, because git refuses a branch that is checked out elsewhere.
+- **Delete Branch and Worktree…** runs only when the branch is fully merged into HEAD. It closes the checkout's space, removes the worktree without `--force`, then runs `git branch -d`. Uncommitted changes make git refuse the removal, and the dialog shows why.
+
+Without the mod, these items behave as before: checkout uses git, and **Delete Branch…** deletes only the branch.
