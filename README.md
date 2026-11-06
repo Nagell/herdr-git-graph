@@ -34,6 +34,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Toolbar **Fetch**, **Pull**, and **Push** buttons beside the branch selector, each with a tooltip naming the exact command and target upstream.
   - The branch selector shows ahead/behind counts (`↑n` / `↓n`); the dropdown reports the tracked upstream.
   - **Push** sets the upstream automatically when the branch does not have one yet.
+  - A push rejected as non-fast-forward opens a confirmation modal offering **Force Push**: it refreshes the target ref, then runs `git push --force-with-lease`. Plain `--force` is never used, server-hook rejections are not offered as forceable, and the lease still aborts if the remote moves again.
   - With no remote configured, **Push** publishes the repository to GitHub: it checks `gh auth status`, then asks for a repository name (prefilled from the folder name) and Private / Public visibility before creating the repo and pushing.
   - A missing or unauthenticated GitHub CLI reports what to install or run instead of disabling Push.
   - Fetch disables without a remote; Pull needs an upstream, Push needs a commit on a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.

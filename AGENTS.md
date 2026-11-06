@@ -71,6 +71,7 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - With no remote configured, **Push** turns into **Publish to GitHub**: after `gh auth status` confirms a login, a modal asks for the repository name (prefilled from the folder name, sanitized) and Private / Public visibility, then runs `gh repo create <name> --source <root> --remote origin --private|--public` followed by `git push --set-upstream origin <branch>`.
   - A missing `gh` binary or an unauthenticated CLI produces an actionable toast instead of silently disabling the button.
   - The selector shows ahead/behind counts (`↑n` / `↓n`) and the dropdown shows the tracked upstream. Tooltips state the exact command and target.
+  - A push rejected as non-fast-forward opens a confirmation modal offering **Force Push**: it refreshes the target ref, then runs `git push --force-with-lease`. Plain `--force` is never used, server-hook rejections are not offered as forceable, and the lease still aborts if the remote moves again.
   - Fetch disables without a remote; Pull needs an upstream, Push needs a commit and a branch, and all three wait for an in-progress merge/rebase/cherry-pick or another git operation.
   - Remote commands run with `credential.interactive=false` and an HTTP low-speed cutoff so a missing prompt or stalled transfer fails loudly instead of hanging the toolbar.
 - **Background AI Commit Worker**:

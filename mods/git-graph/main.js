@@ -78,6 +78,8 @@ import {
   filterVisibleCleanModels,
   findLargeCommit,
   splitRemoteBranch,
+  pushArgs,
+  isPushRejection,
   deleteRemoteBranchArgs,
   fetchRemoteBranchArgs,
   renameRemoteBranchPushArgs,
@@ -2056,8 +2058,19 @@ export default class GitGraph extends View {
   }
 
   /** Runs `git fetch`, `git pull` or `git push` for the current repository. */
-  runRemoteAction(kind, cx) {
+  runRemoteAction(kind, cx, options = {}) {
     if (!this.root || this.busy || this.remoteAction) return;
+    const force = kind === "push" && Boolean(options.force);
+    // A confirmation modal is tied to the checkout and branch it described.
+    // Never force a different branch that became current while it was open.
+    if (force && options.expectBranch && options.expectBranch !== this.currentBranch) {
+      notify({
+        title: "Push cancelled",
+        body: `The checked-out branch changed to '${this.currentBranch || "HEAD"}'. Push again to confirm.`,
+        level: "error",
+      });
+      return;
+    }
     if (kind === "pull" && !this.upstream) {
       notify({
         title: "Nothing to pull",
@@ -2079,6 +2092,10 @@ export default class GitGraph extends View {
       return;
     }
     if (kind === "push" && !this.remotes.length) {
+      if (force) {
+        notify({ title: "Cannot force push", body: "This repository has no remote configured.", level: "error" });
+        return;
+      }
       this.startPublishFlow(cx);
       return;
     }
@@ -2097,19 +2114,42 @@ export default class GitGraph extends View {
     cx.spawn(async (cx) => {
       let ok = false;
       let body = "";
+      let detail = "";
+      let rejected = false;
       let target = upstream;
       try {
         let args;
+        // Refresh the target ref before a forced retry. When the remote
+        // advanced since the last fetch, a stale remote-tracking ref makes
+        // --force-with-lease refuse the very push that was just confirmed.
+        // The lease still aborts if the remote moves again after this fetch.
+        if (force) {
+          const { remote: forceRemote, branch: forceBranch } = splitRemoteBranch(
+            upstream || `${pushRemote}/${branch}`,
+            remotes
+          );
+          const fetched = await exec(
+            "git",
+            [...NETWORK, ...fetchRemoteBranchArgs(forceRemote, forceBranch)],
+            { cwd: root, on }
+          );
+          if (fetched.code !== 0) {
+            detail = (fetched.stderr || fetched.stdout).trim() || `git fetch exited with code ${fetched.code}`;
+            body = detail.length > 600 ? `${detail.slice(0, 600)}…` : detail;
+            return;
+          }
+        }
         if (kind === "fetch") {
           args = [...NETWORK, "fetch", "--all", "--prune"];
           target = remotes.length === 1 ? remotes[0] : `${remotes.length} remotes`;
         } else if (kind === "pull") {
           args = [...NETWORK, "pull", "--no-edit"];
-        } else if (upstream) {
-          args = [...NETWORK, "push"];
         } else {
-          args = [...NETWORK, "push", "--set-upstream", "--end-of-options", pushRemote, branch];
-          target = `${pushRemote}/${branch}`;
+          args = [
+            ...NETWORK,
+            ...pushArgs({ hasUpstream: Boolean(upstream), remote: pushRemote, branch, force }),
+          ];
+          target = upstream || `${pushRemote}/${branch}`;
         }
 
         const r = await exec("git", args, { cwd: root, on });
@@ -2124,19 +2164,28 @@ export default class GitGraph extends View {
                   ? `Pushed ${branch} to ${target}.`
                   : `Pushed ${branch} and set upstream to ${target}.`;
         } else {
-          const detail = (r.stderr || r.stdout).trim() || `git exited with code ${r.code}`;
+          detail = (r.stderr || r.stdout).trim() || `git exited with code ${r.code}`;
           body = detail.length > 600 ? `${detail.slice(0, 600)}…` : detail;
+          // Only a normal push opens the force dialog. A failed
+          // --force-with-lease retry is reported directly, because the remote
+          // moved since the last fetch and forcing again would be wrong.
+          rejected = kind === "push" && !force && isPushRejection(detail);
         }
       } catch (err) {
-        body = err instanceof Error ? err.message : String(err);
+        detail = err instanceof Error ? err.message : String(err);
+        body = detail;
       } finally {
         this.remoteAction = null;
-        notify({
-          title: `${label} ${ok ? "complete" : "failed"}`,
-          body,
-          level: ok ? "success" : "error",
-          ...(ok ? { timeout: 2000 } : {}),
-        });
+        if (rejected) {
+          this.openModal("force-push", { branch, upstream, remote: pushRemote, detail: body }, cx);
+        } else {
+          notify({
+            title: `${label} ${ok ? "complete" : "failed"}`,
+            body,
+            level: ok ? "success" : "error",
+            ...(ok ? { timeout: 2000 } : {}),
+          });
+        }
         this.refresh(cx);
         if (ok && (kind === "fetch" || kind === "pull")) {
           this.loadRemoteTagMap(cx, { force: true });
@@ -2808,6 +2857,16 @@ export default class GitGraph extends View {
         error: null,
       };
       this.modalInput = null;
+    } else if (type === "force-push") {
+      this.modalDialog = {
+        type,
+        branch: target?.branch || this.currentBranch,
+        upstream: target?.upstream || this.upstream,
+        remote: target?.remote || this.pushRemote(),
+        detail: target?.detail || "",
+        error: null,
+      };
+      this.modalInput = null;
     } else if (type === "reset") {
       this.modalDialog = { type, commit: target, resetMode: "mixed", error: null };
       this.modalInput = null;
@@ -2951,6 +3010,15 @@ export default class GitGraph extends View {
           level: "success",
         });
       }
+      return;
+    }
+
+    // Confirming a rejected push re-runs the push with --force-with-lease. The
+    // modal collected no input, so only the branch guard and the action remain.
+    if (type === "force-push") {
+      const expectedBranch = dialog.branch;
+      this.closeModal(cx);
+      this.runRemoteAction("push", cx, { force: true, expectBranch: expectedBranch });
       return;
     }
 
@@ -7762,7 +7830,9 @@ export default class GitGraph extends View {
                       .text_size(13)
                       .text_color(color(t.foreground))
                       .child(
-                        dialog.type === "rename-tag"
+                        dialog.type === "force-push"
+                          ? "Push Rejected"
+                          : dialog.type === "rename-tag"
                           ? `Rename Tag '${dialog.oldTag}'`
                           : dialog.type === "push-tag"
                           ? `Publish Tag '${dialog.tag}'`
@@ -7849,7 +7919,9 @@ export default class GitGraph extends View {
                   .text_size(11)
                   .text_color(color(t.muted))
                   .child(
-                    dialog.type === "rename-tag"
+                    dialog.type === "force-push"
+                      ? `The remote '${dialog.upstream || `${dialog.remote}/${dialog.branch}`}' has commits that are not in '${dialog.branch}'.`
+                      : dialog.type === "rename-tag"
                       ? `Create '${renameDraft || "…"}' at the same commit and remove '${dialog.oldTag}'; annotated tags keep their message`
                       : dialog.type === "push-tag"
                       ? `Push local tag '${dialog.tag}' to '${dialog.remote || "the selected remote"}'`
@@ -8048,6 +8120,37 @@ export default class GitGraph extends View {
                 .text_color(color(t.ansi1))
                 .child("⚠️ Dropping a stash permanently removes the saved changes. This cannot be undone.")
             )
+          )
+          .when(dialog.type === "force-push", (e) =>
+            e
+              .child(
+                div()
+                  .p(8)
+                  .rounded(6)
+                  .bg(color(t.ansi1 + "18"))
+                  .border_1()
+                  .border_color(color(t.ansi1 + "44"))
+                  .text_size(10.5)
+                  .text_color(color(t.ansi1))
+                  .child(
+                    "⚠️ Force push rewrites the remote branch with --force-with-lease. Commits that exist only on the remote will be lost, and anyone tracking it must reset."
+                  )
+              )
+              .when(Boolean(dialog.detail), (inner) =>
+                inner.child(
+                  div()
+                    .max_h(110)
+                    .overflow_hidden()
+                    .p(8)
+                    .rounded(6)
+                    .bg(color(t.background))
+                    .border_1()
+                    .border_color(color(t.border))
+                    .text_size(9.5)
+                    .text_color(color(t.muted))
+                    .child(dialog.detail)
+                )
+              )
           )
           // Inline error display
           .when(Boolean(dialog.error), (e) =>
@@ -8785,7 +8888,7 @@ export default class GitGraph extends View {
                   .bg(color(
                     dialog.type === "reset" && dialog.resetMode === "hard"
                       ? t.ansi1
-                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "delete-tag" || dialog.type === "drop-stash"
+                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "delete-tag" || dialog.type === "drop-stash" || dialog.type === "force-push"
                       ? t.ansi1
                       : t.solid
                   ))
@@ -8815,6 +8918,8 @@ export default class GitGraph extends View {
                         ? "Installing OpenCode…"
                         : dialog.type === "publish" || dialog.type === "push-tag"
                         ? "Publishing…"
+                        : dialog.type === "force-push"
+                        ? "Force Pushing…"
                         : dialog.type === "stash"
                         ? "Stashing…"
                         : dialog.type === "unstash"
@@ -8846,6 +8951,8 @@ export default class GitGraph extends View {
                       ? "Create & Push"
                       : dialog.type === "push-tag"
                       ? "Publish Tag"
+                      : dialog.type === "force-push"
+                      ? "Force Push"
                       : dialog.type === "branch"
                       ? "Create Branch"
                       : dialog.type === "tag"

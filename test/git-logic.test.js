@@ -44,6 +44,8 @@ import {
   parseCommitStats,
   findLargeCommit,
   splitRemoteBranch,
+  pushArgs,
+  isPushRejection,
   deleteRemoteBranchArgs,
   fetchRemoteBranchArgs,
   renameRemoteBranchPushArgs,
@@ -878,6 +880,47 @@ test("renameRemoteBranchPushArgs: pushes the tracked ref under the new branch na
     "--end-of-options",
     "refs/remotes/upstream/feat/old:refs/heads/feat/nested/new",
   ]);
+});
+
+test("pushArgs: builds upstream and force-with-lease variants", () => {
+  assert.deepEqual(pushArgs({ hasUpstream: true, remote: "origin", branch: "main" }), ["push"]);
+
+  assert.deepEqual(pushArgs({ hasUpstream: false, remote: "origin", branch: "feat/x" }), [
+    "push",
+    "--set-upstream",
+    "--end-of-options",
+    "origin",
+    "feat/x",
+  ]);
+
+  assert.deepEqual(pushArgs({ hasUpstream: true, remote: "origin", branch: "main", force: true }), [
+    "push",
+    "--force-with-lease",
+  ]);
+  // Never plain --force: the lease must protect a remote that moved again.
+  assert.equal(pushArgs({ hasUpstream: true, force: true }).includes("--force"), false);
+
+  assert.deepEqual(
+    pushArgs({ hasUpstream: false, remote: "upstream", branch: "feat/nested/new", force: true }),
+    ["push", "--force-with-lease", "--set-upstream", "--end-of-options", "upstream", "feat/nested/new"]
+  );
+});
+
+test("isPushRejection: offers force only for diverged remote branches", () => {
+  assert.equal(
+    isPushRejection("! [rejected] main -> main (non-fast-forward)\nerror: failed to push some refs to 'origin'"),
+    true
+  );
+  assert.equal(isPushRejection("! [rejected] feat/x -> feat/x (fetch first)"), true);
+  assert.equal(isPushRejection("! [rejected] main -> main (stale info)"), true);
+
+  // A server-side hook rejection cannot be fixed by rewriting the ref.
+  assert.equal(
+    isPushRejection("! [remote rejected] main -> main (pre-receive hook declined)"),
+    false
+  );
+  assert.equal(isPushRejection("fatal: unable to access 'https://example.com/repo.git'"), false);
+  assert.equal(isPushRejection(""), false);
 });
 
 test("resolveDisplayRefs: folds HEAD and pairs local with remote refs", () => {

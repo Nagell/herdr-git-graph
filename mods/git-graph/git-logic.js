@@ -1176,6 +1176,35 @@ export function splitRemoteBranch(refText, remotes = []) {
 }
 
 /**
+ * Builds the arguments for a toolbar push. A rejected push is only ever
+ * retried with `--force-with-lease`: it still aborts when the remote moved
+ * since the last fetch, while plain `--force` would overwrite that work.
+ *
+ * @param {{ hasUpstream?: boolean, remote?: string | null, branch?: string, force?: boolean }} [options]
+ * @returns {string[]}
+ */
+export function pushArgs({ hasUpstream = false, remote = null, branch = "", force = false } = {}) {
+  const args = ["push"];
+  if (force) args.push("--force-with-lease");
+  if (hasUpstream) return args;
+  return [...args, "--set-upstream", "--end-of-options", remote, branch];
+}
+
+/**
+ * Tells whether git refused a push because the remote branch has commits the
+ * local branch lacks, which is the only rejection a force push can resolve.
+ * Remote-hook rejections (protected branch, pre-receive) are not forceable.
+ *
+ * @param {string | null | undefined} output
+ * @returns {boolean}
+ */
+export function isPushRejection(output) {
+  const text = String(output ?? "");
+  if (/\[remote rejected\]/i.test(text)) return false;
+  return /non-fast-forward|fetch first|stale info|\[rejected\]/i.test(text);
+}
+
+/**
  * Builds safe arguments for deleting a remote branch via `git push`.
  *
  * @param {string} remote
