@@ -2601,6 +2601,77 @@ export function findLargeCommit(stdout, threshold = 1000) {
   return largest && largest.changed >= threshold ? largest : null;
 }
 
+/**
+ * Parses OpenCode session message history to determine the worker outcome,
+ * whether it encountered an error, or if it finished cleanly with an explanation
+ * (e.g. why no commits were made or files were preserved).
+ *
+ * @param {Record<string, any> | Array<any> | null | undefined} sessionData
+ * @returns {{
+ *   error: { errorMessage: string; errorType?: string } | null;
+ *   outcome: string | null;
+ *   lastText: string;
+ *   intentionallySkipped: boolean;
+ *   justification: string;
+ * }}
+ */
+export function parseTreeAgentSession(sessionData) {
+  const list = Array.isArray(sessionData?.data)
+    ? sessionData.data
+    : Array.isArray(sessionData)
+    ? sessionData
+    : [];
+
+  const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
+  const error = errEntry?.error
+    ? {
+        errorMessage: errEntry.error.message || errEntry.error.type,
+        errorType: errEntry.error.type,
+      }
+    : null;
+
+  const idleEntry = list.find((m) => m?.type === "idle");
+  const outcome = idleEntry?.outcome ?? null;
+
+  let lastText = "";
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (m?.type === "assistant" && Array.isArray(m?.content)) {
+      const texts = m.content
+        .filter((c) => c?.type === "text" && typeof c?.text === "string")
+        .map((c) => c.text.trim())
+        .filter(Boolean);
+      if (texts.length) {
+        lastText = texts.join("\n\n");
+        break;
+      }
+    }
+  }
+
+  const lower = lastText.toLowerCase();
+  const intentionallySkipped =
+    lower.includes("nothing to commit") ||
+    lower.includes("no commit") ||
+    lower.includes("preserve") ||
+    lower.includes("intentionally") ||
+    lower.includes("user-owned") ||
+    lower.includes("untracked");
+
+  let justification = "";
+  if (lastText) {
+    const firstPara = lastText.split("\n\n")[0].replace(/\r?\n+/g, " ").trim();
+    justification = firstPara.length > 250 ? firstPara.slice(0, 247) + "…" : firstPara;
+  }
+
+  return {
+    error,
+    outcome,
+    lastText,
+    intentionallySkipped,
+    justification,
+  };
+}
+
 /** Official OpenCode CLI install command from https://opencode.ai/docs/ */
 export const OPENCODE_INSTALL_CMD = "curl -fsSL https://opencode.ai/install | bash";
 

@@ -60,6 +60,7 @@ import {
   diffRows,
   isDiffable,
   isBinaryDiff,
+  parseTreeAgentSession,
   highlightRows,
   buildDiffView,
   lineSegments,
@@ -6436,28 +6437,31 @@ export default class GitGraph extends View {
   }
 
   /**
-   * The session's last error message and type, if OpenCode recorded one.
+   * Reads the OpenCode session message history and extracts the worker outcome,
+   * error details, and any final assistant explanation.
    *
    * @param {{ sessionId: string; root: string; on: string | null }} agent
-   * @returns {Promise<{ errorMessage?: string; errorType?: string }>}
+   * @returns {Promise<{
+   *   error: { errorMessage: string; errorType?: string } | null;
+   *   outcome: string | null;
+   *   lastText: string;
+   *   intentionallySkipped: boolean;
+   *   justification: string;
+   * }>}
    */
-  async readTreeAgentError(agent) {
+  async readTreeAgentSession(agent) {
     try {
       const mRes = await exec("opencode", ["api", "GET", `/api/session/${agent.sessionId}/message`], {
         cwd: agent.root,
         on: agent.on,
       });
-      if (mRes.code !== 0) return {};
+      if (mRes.code !== 0) {
+        return { error: null, outcome: null, lastText: "", intentionallySkipped: false, justification: "" };
+      }
       const mData = JSON.parse(mRes.stdout);
-      const list = Array.isArray(mData?.data) ? mData.data : Array.isArray(mData) ? mData : [];
-      const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
-      if (!errEntry?.error) return {};
-      return {
-        errorMessage: errEntry.error.message || errEntry.error.type,
-        errorType: errEntry.error.type,
-      };
+      return parseTreeAgentSession(mData);
     } catch {
-      return {};
+      return { error: null, outcome: null, lastText: "", intentionallySkipped: false, justification: "" };
     }
   }
 
@@ -6503,57 +6507,6 @@ export default class GitGraph extends View {
         if (this.getTreeAgent(key)?.sessionId !== agent.sessionId) return;
         if (status.code !== 0) return;
 
-        if (status.stdout.trim()) {
-          if (!live || agent.failed) {
-            // A hidden copy, or one showing another repository, cannot show
-            // the retry picker: stop the spinner and terminal, report the
-            // failure, and leave the retry for the visible view of this
-            // checkout.
-            if (key !== this.treeAgentKey() || !this.isViewVisible()) {
-              if (!agent.stopNotified) {
-                const error = agent.errorMessage ? {} : await this.readTreeAgentError(agent);
-                const detail =
-                  agent.errorMessage ||
-                  error.errorMessage ||
-                  (!live
-                    ? "The worker terminal exited before commits were completed."
-                    : "The AI model stopped before the tree was clean.");
-                const latest = this.getTreeAgent(key);
-                if (latest?.sessionId !== agent.sessionId) return;
-                this.closeTreeAgentToast(latest);
-                this.closeTreeAgentTab(latest);
-                this.setTreeAgent(
-                  {
-                    ...latest,
-                    ...error,
-                    errorMessage: latest.errorMessage || detail,
-                    toastId: null,
-                    deferredStop: true,
-                    stopNotified: true,
-                  },
-                  key
-                );
-                const isLimit =
-                  error.errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(detail || "");
-                notify({
-                  title: isLimit ? "AI usage limit reached" : "AI commit worker stopped",
-                  body: `${this.treeAgentWhere(agent)} · ${detail.slice(0, 300)} · Open its Git Graph to retry.`,
-                  level: "error",
-                });
-              }
-              return;
-            }
-            // Claim first: a copy that loses the claim must not report the stop again.
-            const claimed = this.claimTreeAgent(agent.sessionId, key);
-            if (!claimed) return;
-            this.treeAgentStartingKeys.delete(key);
-            this.closeTreeAgentToast(claimed);
-            this.closeTreeAgentTab(claimed);
-            this.reportTreeAgentStopped(cx, claimed, live);
-          }
-          return;
-        }
-
         let commitCount = 0;
         let largeCommit = null;
         const from = agent.headBefore;
@@ -6568,7 +6521,95 @@ export default class GitGraph extends View {
           );
           if (stats.code === 0) largeCommit = findLargeCommit(stats.stdout, CLEAN_AGENT_LARGE_COMMIT_LINES);
         }
-        this.finishTreeAgent(agent, cx, commitCount, key, largeCommit);
+
+        const isClean = !status.stdout.trim();
+
+        // If new commits were created, the worker succeeded even if some untracked
+        // user files (like .env) were intentionally preserved.
+        if (commitCount > 0) {
+          this.finishTreeAgent(agent, cx, commitCount, key, largeCommit, isClean);
+          return;
+        }
+
+        // If the working tree is completely clean, finish with success.
+        if (isClean) {
+          this.finishTreeAgent(agent, cx, 0, key, null, true);
+          return;
+        }
+
+        // The working tree is still dirty and no new commits were made. Inspect the session.
+        const sessionInfo = await this.readTreeAgentSession(agent);
+        const hasError = Boolean(sessionInfo.error?.errorMessage);
+
+        // If the agent cleanly completed its evaluation and explained why it did not commit
+        // (e.g. files intentionally preserved per AGENTS.md), do not treat it as a crash or open the retry picker.
+        if (!hasError && (sessionInfo.intentionallySkipped || sessionInfo.outcome === "succeeded" || sessionInfo.lastText)) {
+          this.finishTreeAgentWithJustification(
+            agent,
+            cx,
+            key,
+            sessionInfo.justification || "No commits created according to project rules."
+          );
+          return;
+        }
+
+        // If the run suffered a real error or terminal exited unexpectedly, report the failure.
+        if (!live || agent.failed || hasError) {
+          if (key !== this.treeAgentKey() || !this.isViewVisible()) {
+            if (!agent.stopNotified) {
+              const err = sessionInfo.error || (agent.errorMessage ? { errorMessage: agent.errorMessage } : {});
+              const detail =
+                agent.errorMessage ||
+                err.errorMessage ||
+                (!live
+                  ? "The worker terminal exited before commits were completed."
+                  : "The AI model stopped before the tree was clean.");
+              const latest = this.getTreeAgent(key);
+              if (latest?.sessionId !== agent.sessionId) return;
+              this.closeTreeAgentToast(latest);
+              this.closeTreeAgentTab(latest);
+              this.setTreeAgent(
+                {
+                  ...latest,
+                  ...err,
+                  errorMessage: latest.errorMessage || detail,
+                  toastId: null,
+                  deferredStop: true,
+                  stopNotified: true,
+                },
+                key
+              );
+              const isLimit =
+                err.errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(detail || "");
+              notify({
+                title: isLimit ? "AI usage limit reached" : "AI commit worker stopped",
+                body: `${this.treeAgentWhere(agent)} · ${detail.slice(0, 300)} · Open its Git Graph to retry.`,
+                level: "error",
+              });
+            }
+            return;
+          }
+
+          // Claim first: a copy that loses the claim must not report the stop again.
+          const claimed = this.claimTreeAgent(agent.sessionId, key);
+          if (!claimed) return;
+          this.treeAgentStartingKeys.delete(key);
+          this.closeTreeAgentToast(claimed);
+          this.closeTreeAgentTab(claimed);
+          this.reportTreeAgentStopped(cx, claimed, live, sessionInfo.error);
+          return;
+        }
+
+        // Live terminal that settled without committing and without error:
+        if (live && settled) {
+          this.finishTreeAgentWithJustification(
+            agent,
+            cx,
+            key,
+            sessionInfo.justification || "Worker finished without creating commits."
+          );
+          return;
+        }
       } finally {
         const latest = this.treeAgentChecks.get(key);
         if (latest?.sessionId === agent.sessionId) latest.inFlight = false;
@@ -6584,14 +6625,15 @@ export default class GitGraph extends View {
    * @param {import("./gpui-kit.js").Context} cx
    * @param {Record<string, any>} agent the claimed worker
    * @param {boolean} live whether its terminal was still running
+   * @param {{ errorMessage?: string; errorType?: string } | null} [errObj]
    */
-  async reportTreeAgentStopped(cx, agent, live) {
-    let errorMessage = agent.errorMessage;
-    let errorType = agent.errorType;
+  async reportTreeAgentStopped(cx, agent, live, errObj = null) {
+    let errorMessage = agent.errorMessage || errObj?.errorMessage;
+    let errorType = agent.errorType || errObj?.errorType;
     if (!errorMessage) {
-      const error = await this.readTreeAgentError(agent);
-      errorMessage = error.errorMessage;
-      errorType = error.errorType;
+      const sessionInfo = await this.readTreeAgentSession(agent);
+      errorMessage = sessionInfo.error?.errorMessage;
+      errorType = sessionInfo.error?.errorType;
     }
     const isLimit = errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(errorMessage || "");
     const title = isLimit ? "AI usage limit reached" : "AI commit worker stopped";
@@ -6629,15 +6671,16 @@ export default class GitGraph extends View {
   }
 
   /**
-   * The commits landed and the tree is clean: close the worker for good.
+   * The commits landed (or tree settled): close the worker for good.
    *
    * @param {Record<string, any>} agent the claimed worker
    * @param {import("./gpui-kit.js").Context} cx
    * @param {number} commitCount new commits since `agent.headBefore`
    * @param {string} key the worker's checkout key
    * @param {{ hash: string, added: number, deleted: number, changed: number } | null} [largeCommit] a new commit that may bundle unrelated changes
+   * @param {boolean} [isClean=true] whether the working tree is completely clean
    */
-  finishTreeAgent(agent, cx, commitCount, key, largeCommit = null) {
+  finishTreeAgent(agent, cx, commitCount, key, largeCommit = null, isClean = true) {
     // Only the copy that wins the claim reports success; the rest stop here,
     // so one finished worker produces one toast no matter how many copies are open.
     const claimed = this.claimTreeAgent(agent.sessionId, key);
@@ -6648,8 +6691,10 @@ export default class GitGraph extends View {
     const large = largeCommit && largeCommit.changed >= CLEAN_AGENT_LARGE_COMMIT_LINES ? largeCommit : null;
     const countText =
       commitCount > 0
-        ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · working tree clean · background worker stopped`
-        : "Working tree is clean · background worker stopped";
+        ? `${commitCount} new commit${commitCount === 1 ? "" : "s"} · ${isClean ? "working tree clean" : "some files preserved"} · background worker stopped`
+        : isClean
+        ? "Working tree is clean · background worker stopped"
+        : "No commits created · background worker stopped";
     notify({
       title: large ? "AI commit worker finished · review large commit" : "AI commit worker finished",
       body: `${this.treeAgentWhere(agent)} · ${countText}${
@@ -6661,6 +6706,30 @@ export default class GitGraph extends View {
     });
     // A copy showing that checkout refreshes it now; another repository's copy
     // would only sweep its own tree, so leave that to the visible graph's timer.
+    if (key === this.treeAgentKey()) this.refresh(cx);
+    cx.notify();
+  }
+
+  /**
+   * The worker finished cleanly but made 0 commits, providing an explanation
+   * (e.g. files intentionally preserved per AGENTS.md rules).
+   *
+   * @param {Record<string, any>} agent the claimed worker
+   * @param {import("./gpui-kit.js").Context} cx
+   * @param {string} key the worker's checkout key
+   * @param {string} justification brief rationale provided by the agent
+   */
+  finishTreeAgentWithJustification(agent, cx, key, justification) {
+    const claimed = this.claimTreeAgent(agent.sessionId, key);
+    if (!claimed) return;
+    this.treeAgentStartingKeys.delete(key);
+    this.closeTreeAgentToast(claimed);
+    this.closeTreeAgentTab(claimed);
+    notify({
+      title: "AI commit worker finished · no commits",
+      body: `${this.treeAgentWhere(agent)} · ${justification || "No commits created according to project rules."}`,
+      level: "info",
+    });
     if (key === this.treeAgentKey()) this.refresh(cx);
     cx.notify();
   }

@@ -63,6 +63,7 @@ import {
   removeWorktreeArgs,
   normalizeCheckoutPath,
   SPACE_ACTIONS_MOD,
+  parseTreeAgentSession,
 } from "../mods/git-graph/git-logic.js";
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
@@ -1566,4 +1567,86 @@ test("isBinaryDiff: identifies true binary diffs without false-positives on sour
   assert.equal(isBinaryDiff(""), false);
   assert.equal(isBinaryDiff(null), false);
   assert.equal(isBinaryDiff(undefined), false);
+});
+
+test("parseTreeAgentSession: parses session data for outcomes, errors, and justifications", () => {
+  // Empty and malformed
+  assert.deepEqual(parseTreeAgentSession(null), {
+    error: null,
+    outcome: null,
+    lastText: "",
+    intentionallySkipped: false,
+    justification: "",
+  });
+  assert.deepEqual(parseTreeAgentSession({}), {
+    error: null,
+    outcome: null,
+    lastText: "",
+    intentionallySkipped: false,
+    justification: "",
+  });
+  assert.deepEqual(parseTreeAgentSession([]), {
+    error: null,
+    outcome: null,
+    lastText: "",
+    intentionallySkipped: false,
+    justification: "",
+  });
+
+  // Successful skip with justification
+  const skipSession = {
+    data: [
+      { type: "user", content: [{ type: "text", text: "Clean the tree" }] },
+      {
+        type: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "There is nothing to commit. The remaining files (docs/cloud-backup-plan.md and .env) are user-owned untracked files according to AGENTS.md.",
+          },
+        ],
+      },
+      { type: "idle", outcome: "succeeded" },
+    ],
+  };
+  const skipResult = parseTreeAgentSession(skipSession);
+  assert.equal(skipResult.outcome, "succeeded");
+  assert.equal(skipResult.error, null);
+  assert.equal(skipResult.intentionallySkipped, true);
+  assert.equal(
+    skipResult.justification,
+    "There is nothing to commit. The remaining files (docs/cloud-backup-plan.md and .env) are user-owned untracked files according to AGENTS.md."
+  );
+
+  // Session with error
+  const errorSession = [
+    {
+      type: "assistant",
+      error: {
+        message: "Context length exceeded limit of 128000 tokens",
+        type: "rate_limit_error",
+      },
+    },
+    { type: "idle", outcome: "failed" },
+  ];
+  const errorResult = parseTreeAgentSession(errorSession);
+  assert.deepEqual(errorResult.error, {
+    errorMessage: "Context length exceeded limit of 128000 tokens",
+    errorType: "rate_limit_error",
+  });
+  assert.equal(errorResult.outcome, "failed");
+
+  // Long text truncation for notification toast
+  const longText = "A".repeat(300);
+  const longSession = {
+    data: [
+      {
+        type: "assistant",
+        content: [{ type: "text", text: longText }],
+      },
+    ],
+  };
+  const longResult = parseTreeAgentSession(longSession);
+  assert.equal(longResult.justification.length, 248);
+  assert.equal(longResult.justification.endsWith("…"), true);
 });
