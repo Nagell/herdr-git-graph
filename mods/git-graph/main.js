@@ -604,6 +604,7 @@ export default class GitGraph extends View {
     }
     const root = this.root;
     if (!root) return;
+    const normPath = path.startsWith(root + "/") ? path.slice(root.length + 1) : path;
 
     const activeTabs = spaces().find((space) => space.active)?.tabs ?? [];
     const editorTabIds = new Set(
@@ -613,7 +614,7 @@ export default class GitGraph extends View {
     );
     const sharedTabs = shared("file-editor.openTabs");
     const openTabs = sharedTabs && typeof sharedTabs === "object" ? sharedTabs : {};
-    const target = fileEditorTabTarget(root, path, activeTabs, openTabs, editorTabIds);
+    const target = fileEditorTabTarget(root, normPath, activeTabs, openTabs, editorTabIds);
 
     if (target.existingTabId) {
       run("tab.select", { id: target.existingTabId });
@@ -625,7 +626,7 @@ export default class GitGraph extends View {
     }
 
     /** @type {Record<string, any>} */
-    const tabProps = { folder: root, file: path };
+    const tabProps = { folder: root, file: normPath };
     const on = this.on ?? this.diffOn;
     if (on) tabProps.on = on;
     run("tab.new", { name: target.tabName, mod: FILE_EDITOR_MOD, props: tabProps });
@@ -634,8 +635,12 @@ export default class GitGraph extends View {
 
   /** Reads the one diff this tab was opened for, as a unified diff string. */
   async readDiff(root) {
-    const path = this.diffFile;
+    let path = this.diffFile;
     const on = this.diffOn;
+
+    if (path && root && path.startsWith(root + "/")) {
+      path = path.slice(root.length + 1);
+    }
 
     if (!isDiffable(path)) {
       return "Binary file · cannot be diffed";
@@ -673,7 +678,8 @@ export default class GitGraph extends View {
     // an all-added diff from its contents instead.
     const tracked = await exec("git", [...READ, "ls-files", "--error-unmatch", "--", path], { cwd: root, on });
     if (tracked.code !== 0) {
-      const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
+      const fullPath = path.startsWith("/") ? path : `${root}/${path}`;
+      const text = await readTextFile(fullPath, { on }).catch(() => null);
       if (text === null) return "Cannot preview this file (binary, too large, or unreadable)";
       if (text.includes("\0")) return "Binary file · cannot be diffed";
       const lines = text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500);
@@ -718,7 +724,13 @@ export default class GitGraph extends View {
     this.diffLoading = true;
     cx.notify();
 
-    const cwd = this.root;
+    const cwd =
+      this.root ||
+      (this.diffFile && this.diffFile.startsWith("/")
+        ? this.diffFile.slice(0, this.diffFile.lastIndexOf("/")) || "/"
+        : null) ||
+      this.getLocation()?.cwd;
+
     cx.spawn(async (cx) => {
       try {
         if (!cwd) throw new Error("No folder for this diff");
@@ -726,6 +738,9 @@ export default class GitGraph extends View {
         if (top.code !== 0) throw new Error(top.stderr.trim() || "Not a git repository");
         const root = top.stdout.trim();
         this.root = root;
+        if (this.diffFile && this.diffFile.startsWith(root + "/")) {
+          this.diffFile = this.diffFile.slice(root.length + 1);
+        }
 
         const text = await this.readDiff(root);
         this.diffError = null;
@@ -1219,7 +1234,10 @@ export default class GitGraph extends View {
   /** The full-size diff view a "Diff · <file>" tab renders. */
   renderDiffTab(cx) {
     const t = theme();
-    const path = this.diffFile || "";
+    let path = this.diffFile || "";
+    if (this.root && path.startsWith(this.root + "/")) {
+      path = path.slice(this.root.length + 1);
+    }
     const base = path.split("/").pop() || "Diff";
     const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
     const kind = this.diffKind === "commit" ? `commit ${(this.diffHash || "").slice(0, 7)}` : "working tree";
@@ -1334,12 +1352,15 @@ export default class GitGraph extends View {
   openDiffTab(path, cx) {
     const c = this.selectedCommit;
     if (!c || !this.root) return;
-    const fileObj = (c.isWorkingTree ? this.workingTreeFiles : this.commitFiles)?.find((f) => f.path === path);
-    if (!isDiffable(path, fileObj)) {
-      this.selectedFile = path;
+    const normPath = this.root && path.startsWith(this.root + "/") ? path.slice(this.root.length + 1) : path;
+    const fileObj = (c.isWorkingTree ? this.workingTreeFiles : this.commitFiles)?.find(
+      (f) => f.path === normPath || f.path === path
+    );
+    if (!isDiffable(normPath, fileObj)) {
+      this.selectedFile = normPath;
       notify({
         title: "Cannot show diff",
-        body: `${path.split("/").pop() || path} is a binary file and cannot be diffed.`,
+        body: `${normPath.split("/").pop() || normPath} is a binary file and cannot be diffed.`,
         level: "warning",
       });
       cx.notify();
@@ -1347,11 +1368,11 @@ export default class GitGraph extends View {
     }
     const kind = c.isWorkingTree ? "worktree" : "commit";
     const hash = kind === "commit" ? c.hash : null;
-    const base = path.split("/").pop() || path;
+    const base = normPath.split("/").pop() || normPath;
     const suffix = kind === "commit" && c.shortHash ? ` (${c.shortHash})` : "";
     const name = `Diff · ${base}${suffix}`;
 
-    this.selectedFile = path;
+    this.selectedFile = normPath;
     const existing = (spaces().find((s) => s.active)?.tabs ?? []).find((tab) => tab.name === name && !tab.settled);
     if (existing) {
       run("tab.select", { id: existing.id });
@@ -1360,7 +1381,7 @@ export default class GitGraph extends View {
     }
 
     /** @type {Record<string, any>} */
-    const tabProps = { folder: this.root, diffFile: path, diffKind: kind };
+    const tabProps = { folder: this.root, diffFile: normPath, diffKind: kind };
     if (hash) tabProps.diffHash = hash;
     if (this.on) tabProps.on = this.on;
     run("tab.new", { name, mod: "git-graph", props: tabProps });
@@ -7557,9 +7578,10 @@ export default class GitGraph extends View {
     if (cMenu.type === "file") {
       const file = cMenu.file;
       const path = file.path;
-      const absolutePath = resolveRepoPath(this.root, path);
+      const normPath = this.root && path.startsWith(this.root + "/") ? path.slice(this.root.length + 1) : path;
+      const absolutePath = resolveRepoPath(this.root, normPath);
       const canShowFile = this.fileEditorAvailable === true;
-      const diffable = isDiffable(path, file.file ?? file);
+      const diffable = isDiffable(normPath, file.file ?? file);
 
       return div()
         .id("context-menu-backdrop")
@@ -7590,7 +7612,7 @@ export default class GitGraph extends View {
                 .gap(6)
                 .items_center()
                 .child(image(fileIconPath(file.name, isLightColor(t.background))).size(14).flex_none())
-                .child(div().flex_1().min_w(0).truncate().font_semibold().child(path))
+                .child(div().flex_1().min_w(0).truncate().font_semibold().child(normPath))
                 .when(Boolean(file.status), (e) =>
                   e.child(
                     div()
@@ -7608,7 +7630,7 @@ export default class GitGraph extends View {
                 "fmenu-show-diff",
                 "Show Diff",
                 "mods/git-graph/icons/file.svg",
-                (cx) => this.openDiffTab(path, cx),
+                (cx) => this.openDiffTab(normPath, cx),
                 diffable ? null : "Binary file cannot be diffed",
                 !diffable
               )
@@ -7618,7 +7640,7 @@ export default class GitGraph extends View {
                 "fmenu-show-file",
                 "Show File",
                 "mods/git-graph/icons/open-file.svg",
-                (cx) => this.openFileInEditor(path, cx),
+                (cx) => this.openFileInEditor(normPath, cx),
                 canShowFile ? null : FILE_EDITOR_INSTALL_HINT,
                 !canShowFile
               )
