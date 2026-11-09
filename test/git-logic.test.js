@@ -24,6 +24,8 @@ import {
   buildDiffView,
   intraLineDiff,
   diffRows,
+  isDiffable,
+  NON_DIFFABLE_EXTENSIONS,
   lineSegments,
   wrapInlineRows,
   wrapSplitRows,
@@ -1452,4 +1454,53 @@ test("findLargeCommit: returns the largest commit only when it crosses the thres
   const smallOnly = "ccc333\x1ffeat: single file\n20\t5\tmods/git-graph/main.js\n";
   assert.equal(findLargeCommit(smallOnly, 1000), null);
   assert.equal(findLargeCommit("", 1000), null);
+});
+
+test("isDiffable: identifies binary non-diffable files by extension and git metadata", () => {
+  // Common image formats (e.g. png, jpg, gif, webp) are not diffable
+  assert.equal(isDiffable("preview.png"), false);
+  assert.equal(isDiffable("assets/logo.PNG"), false);
+  assert.equal(isDiffable("banner.jpg"), false);
+  assert.equal(isDiffable("photo.jpeg"), false);
+  assert.equal(isDiffable("animation.gif"), false);
+  assert.equal(isDiffable("icon.ico"), false);
+  assert.equal(isDiffable("graphic.webp"), false);
+
+  // Other non-diffable binary formats
+  assert.equal(isDiffable("bundle.zip"), false);
+  assert.equal(isDiffable("archive.tar.gz"), false);
+  assert.equal(isDiffable("document.pdf"), false);
+  assert.equal(isDiffable("binary.wasm"), false);
+  assert.equal(isDiffable("app.exe"), false);
+  assert.equal(isDiffable("lib.so"), false);
+  assert.equal(isDiffable("font.woff2"), false);
+  assert.equal(isDiffable("data.sqlite"), false);
+
+  // Text / code files are diffable
+  assert.equal(isDiffable("mods/git-graph/main.js"), true);
+  assert.equal(isDiffable("README.md"), true);
+  assert.equal(isDiffable("package.json"), true);
+  assert.equal(isDiffable("index.html"), true);
+  assert.equal(isDiffable("style.css"), true);
+  assert.equal(isDiffable("icon.svg"), true);
+  assert.equal(isDiffable("Makefile"), true);
+  assert.equal(isDiffable(".gitignore"), true);
+
+  // Objects with binary flag
+  assert.equal(isDiffable({ path: "custom.bin", binary: true }), false);
+  assert.equal(isDiffable({ path: "file.txt", binary: true }), false);
+  assert.equal(isDiffable({ path: "file.txt", binary: false }), true);
+  assert.equal(isDiffable({ path: "image.png", binary: false }), false);
+
+  // Extra metadata parameter
+  assert.equal(isDiffable("unknown-file", { binary: true }), false);
+  assert.equal(isDiffable("unknown-file", { binary: false }), true);
+
+  // Empty or invalid input
+  assert.equal(isDiffable(""), false);
+  assert.equal(isDiffable(null), false);
+  assert.equal(isDiffable(undefined), false);
+
+  // NON_DIFFABLE_EXTENSIONS contains png
+  assert.ok(NON_DIFFABLE_EXTENSIONS.has("png"));
 });

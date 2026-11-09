@@ -962,6 +962,53 @@ export function flattenFileTree(node, depth, collapsedFolders, rows = []) {
   return rows;
 }
 
+export const NON_DIFFABLE_EXTENSIONS = new Set([
+  // Images
+  "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "avif",
+  "heic", "heif", "psd", "ai", "raw", "icns", "svgz",
+  // Audio
+  "mp3", "wav", "ogg", "flac", "aac", "m4a", "wma", "opus", "aiff", "mid", "midi",
+  // Video
+  "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v", "3gp", "mpg", "mpeg",
+  // Archives & Compressed
+  "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "tgz", "zst", "lz", "lzma", "cab", "iso", "dmg",
+  // Binaries, Libraries & Bytecode
+  "exe", "dll", "so", "dylib", "bin", "o", "a", "obj", "lib", "class", "pyc", "pyo", "pyd", "wasm",
+  // Documents & Proprietary Formats
+  "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+  // Fonts
+  "ttf", "otf", "woff", "woff2", "eot",
+  // Databases & Serialized Data
+  "db", "sqlite", "sqlite3", "parquet", "h5", "hdf5", "pkl", "pickle",
+]);
+
+/**
+ * Returns false if a file is known to be binary/non-diffable by extension or
+ * by metadata (e.g. `file.binary === true` from git numstat).
+ *
+ * @param {string | { path?: string, binary?: boolean } | null | undefined} fileOrPath
+ * @param {{ binary?: boolean } | null | undefined} [extra]
+ * @returns {boolean}
+ */
+export function isDiffable(fileOrPath, extra) {
+  if (!fileOrPath) return false;
+  const path = typeof fileOrPath === "string" ? fileOrPath : fileOrPath?.path ?? "";
+  if (!path) return false;
+  const fileObj = typeof fileOrPath === "object" ? fileOrPath : extra;
+
+  if (fileObj?.binary === true) return false;
+
+  const dot = path.lastIndexOf(".");
+  if (dot !== -1) {
+    const ext = path.slice(dot + 1).toLowerCase();
+    if (NON_DIFFABLE_EXTENSIONS.has(ext)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 /**
  * Parses a unified diff into the rows the diff tab draws.
  *
@@ -995,7 +1042,9 @@ export function diffRows(text) {
       raw.startsWith("dissimilarity index ") ||
       raw.startsWith("rename from ") ||
       raw.startsWith("rename to ") ||
-      raw.startsWith("Binary files ")
+      raw.startsWith("Binary files ") ||
+      raw.startsWith("GIT binary patch") ||
+      raw.startsWith("literal ")
     ) {
       continue;
     }

@@ -58,6 +58,7 @@ import {
   parseRemoteTags,
   logArgs,
   diffRows,
+  isDiffable,
   highlightRows,
   buildDiffView,
   lineSegments,
@@ -635,6 +636,10 @@ export default class GitGraph extends View {
     const path = this.diffFile;
     const on = this.diffOn;
 
+    if (!isDiffable(path)) {
+      return "Binary file · cannot be diffed";
+    }
+
     if (this.diffKind === "commit") {
       if (!this.diffHash) throw new Error("No commit for this diff");
       const r = await exec(
@@ -656,6 +661,9 @@ export default class GitGraph extends View {
         { cwd: root, on }
       );
       if (r.code !== 0) throw new Error(r.stderr.trim() || "git show failed");
+      if (r.stdout.includes("Binary files ") || r.stdout.includes("GIT binary patch") || r.stdout.includes("\0")) {
+        return "Binary file · cannot be diffed";
+      }
       const text = r.stdout.trim() ? r.stdout : "No differences found";
       return text.length > 500000 ? text.slice(0, 500000) + "\n… (diff truncated)" : text;
     }
@@ -666,7 +674,7 @@ export default class GitGraph extends View {
     if (tracked.code !== 0) {
       const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
       if (text === null) return "Cannot preview this file (binary, too large, or unreadable)";
-      if (text.includes("\0")) return "Binary file · no text diff";
+      if (text.includes("\0")) return "Binary file · cannot be diffed";
       const lines = text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500);
       const header = `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n`;
       return header + lines.map((l) => `+${l}`).join("\n");
@@ -688,6 +696,9 @@ export default class GitGraph extends View {
       { cwd: root, on }
     );
     if (r.code !== 0) throw new Error(r.stderr.trim() || "git diff failed");
+    if (r.stdout.includes("Binary files ") || r.stdout.includes("GIT binary patch") || r.stdout.includes("\0")) {
+      return "Binary file · cannot be diffed";
+    }
     const text = r.stdout.trim() ? r.stdout : "No differences found";
     return text.length > 500000 ? text.slice(0, 500000) + "\n… (diff truncated)" : text;
   }
@@ -695,6 +706,14 @@ export default class GitGraph extends View {
   /** Loads the tab's diff and rebuilds the editor only when the text changed. */
   loadDiffTab(cx) {
     if (this.diffLoading || !this.diffFile) return;
+    if (!isDiffable(this.diffFile)) {
+      this.diffLoading = false;
+      this.diffText = "Binary file · cannot be diffed";
+      this.diffRows = [];
+      this.diffError = null;
+      cx.notify();
+      return;
+    }
     this.diffLoading = true;
     cx.notify();
 
@@ -1314,6 +1333,17 @@ export default class GitGraph extends View {
   openDiffTab(path, cx) {
     const c = this.selectedCommit;
     if (!c || !this.root) return;
+    const fileObj = (c.isWorkingTree ? this.workingTreeFiles : this.commitFiles)?.find((f) => f.path === path);
+    if (!isDiffable(path, fileObj)) {
+      this.selectedFile = path;
+      notify({
+        title: "Cannot show diff",
+        body: `${path.split("/").pop() || path} is a binary file and cannot be diffed.`,
+        level: "warning",
+      });
+      cx.notify();
+      return;
+    }
     const kind = c.isWorkingTree ? "worktree" : "commit";
     const hash = kind === "commit" ? c.hash : null;
     const base = path.split("/").pop() || path;
@@ -1817,8 +1847,8 @@ export default class GitGraph extends View {
             wtFiles.push({ path: filePath, status: s, fresh, ...stat });
           }
 
-          // Untracked files line count
-          const freshPaths = wtFiles.filter((f) => f.fresh).map((f) => f.path);
+          // Untracked files line count: count lines only for diffable text files.
+          const freshPaths = wtFiles.filter((f) => f.fresh && isDiffable(f.path)).map((f) => f.path);
           if (freshPaths.length) {
             const wcRes = await exec("wc", ["-l", "--", ...freshPaths], { cwd: root, on });
             if (wcRes.code === 0 && wcRes.stdout) {
@@ -1833,6 +1863,13 @@ export default class GitGraph extends View {
                   f.binary = false;
                 }
               }
+            }
+          }
+          for (const f of wtFiles) {
+            if (f.fresh && !isDiffable(f.path)) {
+              f.binary = true;
+              f.add = 0;
+              f.del = 0;
             }
           }
         }
@@ -4726,9 +4763,12 @@ export default class GitGraph extends View {
     const isFileSelected = !row.isDir && this.selectedFile === row.path;
     const iconPath = row.isDir ? FOLDER_ICON_PATH : fileIconPath(row.name, isLightColor(t.background));
     const status = row.status || "M";
+    const diffable = row.isDir || isDiffable(row.path, row.file);
     const tip = row.isDir
       ? `${row.path}\n${row.add} added · ${row.del} removed\nClick to ${row.isExpanded ? "collapse" : "expand"}`
-      : `${row.path}\n${statusLabel(status)} · ${row.add} added · ${row.del} removed\nClick to open the diff`;
+      : diffable
+      ? `${row.path}\n${statusLabel(status)} · ${row.add} added · ${row.del} removed\nClick to open the diff`
+      : `${row.path}\n${statusLabel(status)} · Binary file (not diffable)`;
 
     return h_flex()
       .id(`${row.isDir ? "dir" : "file"}-${row.path}`)
@@ -4755,7 +4795,11 @@ export default class GitGraph extends View {
       })
       .on_click((_e, cx) => {
         if (row.isDir) this.toggleFolder(row.path, cx);
-        else this.openDiffTab(row.path, cx);
+        else if (diffable) this.openDiffTab(row.path, cx);
+        else {
+          this.selectedFile = row.path;
+          cx.notify();
+        }
       })
       .when(!row.isDir, (e) =>
         e.on_mouse_down("right", (event, cx) => {
@@ -7514,6 +7558,7 @@ export default class GitGraph extends View {
       const path = file.path;
       const absolutePath = resolveRepoPath(this.root, path);
       const canShowFile = this.fileEditorAvailable === true;
+      const diffable = isDiffable(path, file.file ?? file);
 
       return div()
         .id("context-menu-backdrop")
@@ -7558,8 +7603,13 @@ export default class GitGraph extends View {
             )
             .child(div().h(1).bg(color(t.border)).my(3))
             .child(
-              menuItem("fmenu-show-diff", "Show Diff", "mods/git-graph/icons/file.svg", (cx) =>
-                this.openDiffTab(path, cx)
+              menuItem(
+                "fmenu-show-diff",
+                "Show Diff",
+                "mods/git-graph/icons/file.svg",
+                (cx) => this.openDiffTab(path, cx),
+                diffable ? null : "Binary file cannot be diffed",
+                !diffable
               )
             )
             .child(
