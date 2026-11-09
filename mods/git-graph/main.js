@@ -6756,7 +6756,7 @@ export default class GitGraph extends View {
     const branch = this.currentBranch || "HEAD";
     const files = this.workingTreeFiles;
     const shown = files.slice(0, 24).map((f) => {
-      const status = f.status === "U" ? "conflict" : f.status;
+      const status = f.status === "U" ? "conflict" : f.fresh ? "??" : f.status;
       return `- ${status} ${f.path}`;
     });
     if (files.length > shown.length) shown.push(`- …and ${files.length - shown.length} more`);
@@ -6774,7 +6774,8 @@ export default class GitGraph extends View {
       operation,
       shown.length ? `Changed paths:\n${shown.join("\n")}` : "",
       "Work only on the current branch. Do not create or switch branches or worktrees.",
-      "Read the repository's AGENTS.md, CLAUDE.md, and CONTRIBUTING.md first and follow them.",
+      "The user explicitly triggered this cleanup action to commit pending work (source code, tests, documentation, task plans, and project configurations). Even if an AGENTS.md, task note, or historical doc mentions that a file was temporarily uncommitted or WIP, the user's intent now is to review, stage, and commit meaningful work rather than leaving it behind. The ONLY files you should leave uncommitted or untracked are actual local secrets/credentials (e.g. .env, unless .env.example) or files that explicitly belong in .gitignore.",
+      "Read the repository's AGENTS.md, CLAUDE.md, and CONTRIBUTING.md for project conventions and test commands, but adhere to the above user mandate to commit pending work.",
       "Load and follow the @git-change-workflow skill for commit slicing and Conventional Commit messages. This task is an explicit exception to its branch rule: commit on the current branch.",
       "If a merge, rebase, cherry-pick, or revert is in progress, understand and resolve every conflict, stage the resolutions, and complete the operation non-interactively with `git -c core.editor=true merge --continue` (or rebase/cherry-pick/revert --continue). Always pass -m to git commit.",
       "Before the first commit, inspect the full diff and plan the slices: each slice is one logical change that can be reviewed, reverted, or cherry-picked alone.",
@@ -6786,7 +6787,7 @@ export default class GitGraph extends View {
       "Never run git push or any remote-writing command. Do not fetch, force-push, rewrite history, reset --hard, or discard user work. Do not run git clean or amend existing commits.",
       "Do not run sync.sh, herdr-app, or touch ~/.config/herdr-app: herdr-git-graph manages synchronization and UI lifecycle automatically.",
       "Before reporting success, review every new commit with `git log --stat` and confirm no commit mixes unrelated concerns. If one does, do not rewrite history; report exactly which commit and why.",
-      "When done, report the commits you created and confirm the working tree is clean. If there is nothing to commit and no operation to finish, say so and stop.",
+      "When done, report the commits you created and confirm the working tree is clean. If there is genuinely nothing to commit (e.g. only secrets/ignored files remain) and no operation to finish, explain your reasoning clearly and stop.",
     ]
       .filter(Boolean)
       .join("\n\n");
