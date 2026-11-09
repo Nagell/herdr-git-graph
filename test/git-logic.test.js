@@ -25,6 +25,7 @@ import {
   intraLineDiff,
   diffRows,
   isDiffable,
+  isBinaryDiff,
   NON_DIFFABLE_EXTENSIONS,
   lineSegments,
   wrapInlineRows,
@@ -1491,10 +1492,13 @@ test("isDiffable: identifies binary non-diffable files by extension and git meta
   assert.equal(isDiffable({ path: "file.txt", binary: true }), false);
   assert.equal(isDiffable({ path: "file.txt", binary: false }), true);
   assert.equal(isDiffable({ path: "image.png", binary: false }), false);
+  assert.equal(isDiffable({ path: "file.txt", file: { binary: true } }), false);
+  assert.equal(isDiffable({ path: "file.txt", file: { binary: false } }), true);
 
   // Extra metadata parameter
   assert.equal(isDiffable("unknown-file", { binary: true }), false);
   assert.equal(isDiffable("unknown-file", { binary: false }), true);
+  assert.equal(isDiffable("unknown-file", { file: { binary: true } }), false);
 
   // Empty or invalid input
   assert.equal(isDiffable(""), false);
@@ -1503,4 +1507,63 @@ test("isDiffable: identifies binary non-diffable files by extension and git meta
 
   // NON_DIFFABLE_EXTENSIONS contains png
   assert.ok(NON_DIFFABLE_EXTENSIONS.has("png"));
+});
+
+test("isBinaryDiff: identifies true binary diffs without false-positives on source files containing binary keywords", () => {
+  // Genuine binary diff headers
+  assert.equal(
+    isBinaryDiff("diff --git a/preview.png b/preview.png\nindex 44d4a9a..0c7c546 100644\nBinary files a/preview.png and b/preview.png differ\n"),
+    true
+  );
+  assert.equal(
+    isBinaryDiff("diff --git a/icon.ico b/icon.ico\nnew file mode 100644\nBinary files /dev/null and b/icon.ico differ\n"),
+    true
+  );
+  assert.equal(
+    isBinaryDiff("diff --git a/old.bin b/old.bin\ndeleted file mode 100644\nBinary files a/old.bin and /dev/null differ\n"),
+    true
+  );
+  assert.equal(
+    isBinaryDiff("diff --git a/app.wasm b/app.wasm\nGIT binary patch\nliteral 1234\n"),
+    true
+  );
+  assert.equal(
+    isBinaryDiff("Binary files a/data.bin and b/data.bin differ"),
+    true
+  );
+  assert.equal(
+    isBinaryDiff("some text with null \0 byte"),
+    true
+  );
+
+  // Crucial test: A source code file (like main.js) that modifies/adds lines
+  // referencing 'Binary files ' or 'GIT binary patch' MUST NOT be classified as binary!
+  const jsDiff = [
+    "diff --git a/mods/git-graph/main.js b/mods/git-graph/main.js",
+    "index 167c69a..d71c5dc 100644",
+    "--- a/mods/git-graph/main.js",
+    "+++ b/mods/git-graph/main.js",
+    "@@ -664,6 +664,9 @@ export default class GitGraph extends View {",
+    '+      if (r.stdout.includes("Binary files ") || r.stdout.includes("GIT binary patch") || r.stdout.includes("\\0")) {',
+    '+        return "Binary file · cannot be diffed";',
+    "+      }",
+  ].join("\n");
+  assert.equal(isBinaryDiff(jsDiff), false);
+
+  // Normal text diffs
+  const normalDiff = [
+    "diff --git a/README.md b/README.md",
+    "index 111..222 100644",
+    "--- a/README.md",
+    "+++ b/README.md",
+    "@@ -10,3 +10,3 @@",
+    "-old line",
+    "+new line",
+  ].join("\n");
+  assert.equal(isBinaryDiff(normalDiff), false);
+
+  // Edge cases: empty, null, undefined
+  assert.equal(isBinaryDiff(""), false);
+  assert.equal(isBinaryDiff(null), false);
+  assert.equal(isBinaryDiff(undefined), false);
 });

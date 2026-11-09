@@ -996,7 +996,8 @@ export function isDiffable(fileOrPath, extra) {
   if (!path) return false;
   const fileObj = typeof fileOrPath === "object" ? fileOrPath : extra;
 
-  if (fileObj?.binary === true) return false;
+  if (fileObj?.binary === true || fileObj?.file?.binary === true) return false;
+  if (extra?.binary === true || extra?.file?.binary === true) return false;
 
   const dot = path.lastIndexOf(".");
   if (dot !== -1) {
@@ -1007,6 +1008,23 @@ export function isDiffable(fileOrPath, extra) {
   }
 
   return true;
+}
+
+/**
+ * Detects whether Git's diff output represents a binary file rather than text.
+ * Only matches top-level Git diff header lines, never lines inside diff hunks.
+ *
+ * @param {string | null | undefined} text
+ * @returns {boolean}
+ */
+export function isBinaryDiff(text) {
+  if (typeof text !== "string" || !text) return false;
+  if (text.includes("\0")) return true;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("Binary files ") && line.endsWith(" differ")) return true;
+    if (line === "GIT binary patch" || line.startsWith("GIT binary patch ")) return true;
+  }
+  return false;
 }
 
 /**

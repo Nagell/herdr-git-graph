@@ -59,6 +59,7 @@ import {
   logArgs,
   diffRows,
   isDiffable,
+  isBinaryDiff,
   highlightRows,
   buildDiffView,
   lineSegments,
@@ -661,7 +662,7 @@ export default class GitGraph extends View {
         { cwd: root, on }
       );
       if (r.code !== 0) throw new Error(r.stderr.trim() || "git show failed");
-      if (r.stdout.includes("Binary files ") || r.stdout.includes("GIT binary patch") || r.stdout.includes("\0")) {
+      if (isBinaryDiff(r.stdout)) {
         return "Binary file · cannot be diffed";
       }
       const text = r.stdout.trim() ? r.stdout : "No differences found";
@@ -696,7 +697,7 @@ export default class GitGraph extends View {
       { cwd: root, on }
     );
     if (r.code !== 0) throw new Error(r.stderr.trim() || "git diff failed");
-    if (r.stdout.includes("Binary files ") || r.stdout.includes("GIT binary patch") || r.stdout.includes("\0")) {
+    if (isBinaryDiff(r.stdout)) {
       return "Binary file · cannot be diffed";
     }
     const text = r.stdout.trim() ? r.stdout : "No differences found";
