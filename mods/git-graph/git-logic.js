@@ -2678,3 +2678,106 @@ export const OPENCODE_INSTALL_CMD = "curl -fsSL https://opencode.ai/install | ba
 /** Official OpenCode documentation URL */
 export const OPENCODE_DOCS_URL = "https://opencode.ai/docs/";
 
+/**
+ * Computes context menu placement coordinates relative to the view root,
+ * preferring opening downwards to the right of the click, flipping upwards
+ * or to the left if it would overflow the container bounds, and clamping
+ * gracefully so the menu is always fully visible and adjacent to the click.
+ *
+ * @param {object} options
+ * @param {{ x: number, y: number } | null} [options.origin]
+ * @param {{ x?: number, y?: number, width?: number, height?: number } | null} [options.bounds]
+ * @param {number} [options.width]
+ * @param {number} [options.height]
+ * @param {number} [options.zoom]
+ * @param {{ position?: { x: number, y: number }, bounds?: { x: number, y: number }, local_position?: { x: number, y: number } } | null} [options.event]
+ * @param {number} options.menuWidth
+ * @param {number} options.menuHeight
+ * @param {number} [options.overrideX]
+ * @param {number} [options.overrideY]
+ * @param {number} [options.defaultX]
+ * @param {number} [options.defaultY]
+ * @returns {{ x: number, y: number }}
+ */
+export function contextMenuPosition({
+  origin,
+  bounds,
+  width = 0,
+  height = 0,
+  zoom = 1,
+  event,
+  menuWidth,
+  menuHeight,
+  overrideX,
+  overrideY,
+  defaultX = 120,
+  defaultY = 120,
+}) {
+  const z = typeof zoom === "number" && zoom > 0 ? zoom : 1;
+  let paneX = origin?.x ?? (bounds && bounds.x > 0 ? bounds.x : 0);
+  let paneY = origin?.y ?? (bounds && bounds.y > 0 ? bounds.y : 0);
+
+  const maxW = width || (bounds?.width ? bounds.width / z : 0) || 600;
+  const maxH = height || (bounds?.height ? bounds.height / z : 0) || 600;
+
+  // Fallback: If pane coordinates were not established yet, infer pane X from the clicked element's bounds.
+  if (paneX === 0 && typeof event?.bounds?.x === "number") {
+    paneX = event.bounds.x;
+  }
+
+  let x = overrideX != null ? overrideX : typeof event?.position?.x === "number" ? (event.position.x - paneX) / z : defaultX;
+  let y = overrideY != null ? overrideY : typeof event?.position?.y === "number" ? (event.position.y - paneY) / z : defaultY;
+
+  // Guard against window-space leakage: If y was calculated from window coordinates without a valid pane offset,
+  // y will be > maxH or < 0. Do NOT let it clamp to the bottom of the container.
+  if (y > maxH || y < 0) {
+    if (typeof event?.local_position?.y === "number") {
+      const localY = event.local_position.y / z;
+      if (localY >= 0 && localY <= maxH) {
+        y = localY;
+      } else {
+        y = defaultY;
+      }
+    } else {
+      y = defaultY;
+    }
+  }
+  if (x > maxW || x < 0) {
+    if (typeof event?.local_position?.x === "number") {
+      const localX = event.local_position.x / z;
+      if (localX >= 0 && localX <= maxW) {
+        x = localX;
+      } else {
+        x = defaultX;
+      }
+    } else {
+      x = defaultX;
+    }
+  }
+
+  // Horizontal placement:
+  // If opening to the right overflows, try opening to the left of the click.
+  // Otherwise, clamp within container with margin.
+  if (x + menuWidth > maxW - 10) {
+    if (x - menuWidth >= 10) {
+      x = x - menuWidth;
+    } else {
+      x = Math.max(10, maxW - menuWidth - 10);
+    }
+  }
+
+  // Vertical placement:
+  // If opening downwards overflows the container, flip upwards above the click.
+  // Otherwise, clamp within container with margin.
+  if (y + menuHeight > maxH - 10) {
+    if (y - menuHeight >= 10) {
+      y = y - menuHeight;
+    } else {
+      y = Math.max(10, maxH - menuHeight - 10);
+    }
+  }
+
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+

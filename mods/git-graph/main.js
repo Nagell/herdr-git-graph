@@ -97,6 +97,7 @@ import {
   SPACE_ACTIONS_MOD,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
+  contextMenuPosition,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -394,6 +395,8 @@ export default class GitGraph extends View {
     this.lastListLeftClickEvent = null;
     this.lastRightClickRootPos = null;
     this.lastRightClickEvent = null;
+    this.rootOrigin = null;
+    this.rootBounds = null;
     this.width = 0;
     this.height = 0;
     this.manualRoot = null;
@@ -1223,12 +1226,26 @@ export default class GitGraph extends View {
 
   /** Records the view size; wrapping needs the current pane width. */
   updateSize(size, cx) {
-    const w = size && typeof size.width === "number" ? Math.round(size.width) : 0;
-    const h = size && typeof size.height === "number" ? Math.round(size.height) : 0;
+    const zoom = Number(settings()?.zoom) || 1;
+    const w = size && typeof size.width === "number" ? Math.round(size.width / zoom) : 0;
+    const h = size && typeof size.height === "number" ? Math.round(size.height / zoom) : 0;
     if (w !== this.width || h !== this.height) {
       this.width = w;
       this.height = h;
       cx.notify();
+    }
+  }
+
+  /** Tracks the window-relative origin and bounds of the mod view. */
+  updateRootOrigin(e) {
+    if (e.bounds && typeof e.bounds.width === "number" && typeof e.bounds.height === "number") {
+      this.rootBounds = e.bounds;
+    }
+    if (e.position && e.local_position) {
+      this.rootOrigin = {
+        x: e.position.x - e.local_position.x,
+        y: e.position.y - e.local_position.y,
+      };
     }
   }
 
@@ -2429,22 +2446,32 @@ export default class GitGraph extends View {
   }
 
   openCommitContextMenu(commit, e, cx, overrideX, overrideY) {
+    const zoom = Number(settings()?.zoom) || 1;
     const menuWidth = 240;
     const menuHeight = 310;
-    const origin = this.rootOrigin;
-    const b = /** @type {any} */ (this.rootBounds);
-    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
-    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
-
-    const maxW = this.width || b?.width || 600;
-    const maxH = this.height || b?.height || 600;
-    if (x + menuWidth > maxW) {
-      x = Math.max(10, maxW - menuWidth - 10);
-    }
-    if (y + menuHeight > maxH) {
-      y = Math.max(10, maxH - menuHeight - 10);
-    }
-    this.contextMenu = { type: "commit", commit, x, y };
+    const { x, y } = contextMenuPosition({
+      origin: this.rootOrigin,
+      bounds: this.rootBounds,
+      width: this.width,
+      height: this.height,
+      zoom,
+      event: e,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+    });
+    this.contextMenu = {
+      type: "commit",
+      commit,
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+      rawEvent: e,
+    };
     cx.notify();
   }
 
@@ -2567,20 +2594,30 @@ export default class GitGraph extends View {
     }
     const menuWidth = 260;
     const menuHeight = normRef.pairedRemote ? 270 : 240;
-    const origin = this.rootOrigin;
-    const b = /** @type {any} */ (this.rootBounds);
-    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
-    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
-
-    const maxW = this.width || b?.width || 600;
-    const maxH = this.height || b?.height || 600;
-    if (x + menuWidth > maxW) {
-      x = Math.max(10, maxW - menuWidth - 10);
-    }
-    if (y + menuHeight > maxH) {
-      y = Math.max(10, maxH - menuHeight - 10);
-    }
-    this.contextMenu = { type: "branch", ref: normRef, x, y };
+    const zoom = Number(settings()?.zoom) || 1;
+    const { x, y } = contextMenuPosition({
+      origin: this.rootOrigin,
+      bounds: this.rootBounds,
+      width: this.width,
+      height: this.height,
+      zoom,
+      event: e,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+    });
+    this.contextMenu = {
+      type: "branch",
+      ref: normRef,
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+      rawEvent: e,
+    };
     cx.notify();
   }
 
@@ -2589,20 +2626,30 @@ export default class GitGraph extends View {
     const tag = typeof ref === "string" ? { kind: "tag", text: ref } : { ...ref, kind: "tag" };
     const menuWidth = 240;
     const menuHeight = 180;
-    const origin = this.rootOrigin;
-    const b = /** @type {any} */ (this.rootBounds);
-    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
-    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
-
-    const maxW = this.width || b?.width || 600;
-    const maxH = this.height || b?.height || 600;
-    if (x + menuWidth > maxW) {
-      x = Math.max(10, maxW - menuWidth - 10);
-    }
-    if (y + menuHeight > maxH) {
-      y = Math.max(10, maxH - menuHeight - 10);
-    }
-    this.contextMenu = { type: "tag", ref: tag, x, y };
+    const zoom = Number(settings()?.zoom) || 1;
+    const { x, y } = contextMenuPosition({
+      origin: this.rootOrigin,
+      bounds: this.rootBounds,
+      width: this.width,
+      height: this.height,
+      zoom,
+      event: e,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+    });
+    this.contextMenu = {
+      type: "tag",
+      ref: tag,
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+      rawEvent: e,
+    };
     cx.notify();
   }
 
@@ -2760,20 +2807,30 @@ export default class GitGraph extends View {
   openStashContextMenu(stash, e, cx, overrideX, overrideY) {
     const menuWidth = 240;
     const menuHeight = 190;
-    const origin = this.rootOrigin;
-    const b = /** @type {any} */ (this.rootBounds);
-    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
-    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
-
-    const maxW = this.width || b?.width || 600;
-    const maxH = this.height || b?.height || 600;
-    if (x + menuWidth > maxW) {
-      x = Math.max(10, maxW - menuWidth - 10);
-    }
-    if (y + menuHeight > maxH) {
-      y = Math.max(10, maxH - menuHeight - 10);
-    }
-    this.contextMenu = { type: "stash", stash, x, y };
+    const zoom = Number(settings()?.zoom) || 1;
+    const { x, y } = contextMenuPosition({
+      origin: this.rootOrigin,
+      bounds: this.rootBounds,
+      width: this.width,
+      height: this.height,
+      zoom,
+      event: e,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+    });
+    this.contextMenu = {
+      type: "stash",
+      stash,
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+      rawEvent: e,
+    };
     cx.notify();
   }
 
@@ -2781,43 +2838,63 @@ export default class GitGraph extends View {
   openWorkingTreeContextMenu(e, cx, overrideX, overrideY) {
     const menuWidth = 260;
     const menuHeight = 190;
-    const origin = this.rootOrigin;
-    const b = /** @type {any} */ (this.rootBounds);
-    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
-    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
-
-    const maxW = this.width || b?.width || 600;
-    const maxH = this.height || b?.height || 600;
-    if (x + menuWidth > maxW) {
-      x = Math.max(10, maxW - menuWidth - 10);
-    }
-    if (y + menuHeight > maxH) {
-      y = Math.max(10, maxH - menuHeight - 10);
-    }
-    this.contextMenu = { type: "working-tree", x, y };
+    const zoom = Number(settings()?.zoom) || 1;
+    const { x, y } = contextMenuPosition({
+      origin: this.rootOrigin,
+      bounds: this.rootBounds,
+      width: this.width,
+      height: this.height,
+      zoom,
+      event: e,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+    });
+    this.contextMenu = {
+      type: "working-tree",
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+      rawEvent: e,
+    };
     cx.notify();
   }
 
   /** Right-click menu for one file in the changed-files tree. */
   openFileContextMenu(file, e, cx, overrideX, overrideY) {
     if (!file || file.isDir) return;
-    const menuWidth = 300;
-    const menuHeight = 180;
-    const origin = this.rootOrigin;
-    const b = /** @type {any} */ (this.rootBounds);
-    let x = overrideX != null ? overrideX : origin ? e?.position?.x - origin.x : b ? e?.position?.x - b.x : (e?.bounds ? e.position.x - e.bounds.x : (e?.local_position?.x ?? 120));
-    let y = overrideY != null ? overrideY : origin ? e?.position?.y - origin.y : b ? e?.position?.y - b.y : (e?.local_position?.y ?? 120);
-
-    const maxW = this.width || b?.width || 600;
-    const maxH = this.height || b?.height || 600;
-    if (x + menuWidth > maxW) {
-      x = Math.max(10, maxW - menuWidth - 10);
-    }
-    if (y + menuHeight > maxH) {
-      y = Math.max(10, maxH - menuHeight - 10);
-    }
+    const narrow = this.width > 0 && this.width < 400;
+    const menuWidth = narrow ? Math.max(200, Math.min(260, this.width - 20)) : 280;
+    const menuHeight = 135;
+    const zoom = Number(settings()?.zoom) || 1;
+    const { x, y } = contextMenuPosition({
+      origin: this.rootOrigin,
+      bounds: this.rootBounds,
+      width: this.width,
+      height: this.height,
+      zoom,
+      event: e,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+    });
     this.selectedFile = file.path;
-    this.contextMenu = { type: "file", file, x, y };
+    this.contextMenu = {
+      type: "file",
+      file,
+      x,
+      y,
+      menuWidth,
+      menuHeight,
+      overrideX,
+      overrideY,
+      rawEvent: e,
+    };
     cx.notify();
   }
 
@@ -4803,8 +4880,8 @@ export default class GitGraph extends View {
       .items_center()
       .when(isFileSelected, (e) => e.bg(color(t.selected)))
       .hover((s) => s.bg(color(isFileSelected ? t.selected : t.hover)))
+      .when(!this.contextMenu, (e) => e.tooltip(tip))
       .cursor_pointer()
-      .tooltip(tip)
       .on_hover((hovered, cx) => {
         if (hovered) {
           if (this.hoveredFilePath !== row.path) {
@@ -4826,7 +4903,6 @@ export default class GitGraph extends View {
       })
       .when(!row.isDir, (e) =>
         e.on_mouse_down("right", (event, cx) => {
-          cx.stop_propagation();
           this.openFileContextMenu(row, event, cx);
         })
       )
@@ -5116,7 +5192,8 @@ export default class GitGraph extends View {
                       this.selectCommit(item, cx);
                       return;
                     }
-                    const clickX = event?.local_position?.x;
+                    const zoom = Number(settings()?.zoom) || 1;
+                    const clickX = typeof event?.local_position?.x === "number" ? event.local_position.x / zoom : null;
                     if (typeof clickX === "number" && item._badgeBoxes) {
                       const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
                       if (hit) {
@@ -5151,7 +5228,8 @@ export default class GitGraph extends View {
                     this.openStashContextMenu(item, event, cx);
                     return;
                   }
-                  const clickX = event?.local_position?.x;
+                  const zoom = Number(settings()?.zoom) || 1;
+                  const clickX = typeof event?.local_position?.x === "number" ? event.local_position.x / zoom : null;
                   if (typeof clickX === "number" && item._badgeBoxes) {
                     const hit = item._badgeBoxes.find((b) => clickX >= b.xStart && clickX <= b.xEnd);
                     if (hit?.ref.kind === "tag") {
@@ -7665,7 +7743,7 @@ export default class GitGraph extends View {
             .absolute()
             .left(cMenu.x)
             .top(cMenu.y)
-            .w(300)
+            .w(cMenu.menuWidth || 280)
             .p(4)
             .rounded(8)
             .bg(color(t.popover))
@@ -9245,22 +9323,26 @@ export default class GitGraph extends View {
       )
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.handleKeyDown(e, cx))
-      .on_mouse_move((e, _cx) => {
-        if (e.bounds) this.rootBounds = e.bounds;
-        if (e.position && e.local_position) {
-          this.rootOrigin = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
-        }
-      })
-      .on_mouse_down("left", (e, _cx) => {
-        if (e.bounds) this.rootBounds = e.bounds;
-        if (e.position && e.local_position) {
-          this.rootOrigin = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
-        }
-      })
-      .on_mouse_down("right", (e, _cx) => {
-        if (e.bounds) this.rootBounds = e.bounds;
-        if (e.position && e.local_position) {
-          this.rootOrigin = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
+      .on_mouse_move((e, _cx) => this.updateRootOrigin(e))
+      .on_mouse_down("left", (e, _cx) => this.updateRootOrigin(e))
+      .on_mouse_down("right", (e, cx) => {
+        this.updateRootOrigin(e);
+        if (this.contextMenu && this.contextMenu.rawEvent) {
+          const { x, y } = contextMenuPosition({
+            origin: this.rootOrigin,
+            bounds: this.rootBounds,
+            width: this.width,
+            height: this.height,
+            zoom: Number(settings()?.zoom) || 1,
+            event: this.contextMenu.rawEvent,
+            menuWidth: this.contextMenu.menuWidth,
+            menuHeight: this.contextMenu.menuHeight,
+            overrideX: this.contextMenu.overrideX,
+            overrideY: this.contextMenu.overrideY,
+          });
+          this.contextMenu.x = x;
+          this.contextMenu.y = y;
+          cx.notify();
         }
       })
       .on_size_change((size, cx) => this.updateSize(size, cx))
