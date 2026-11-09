@@ -64,6 +64,7 @@ import {
   normalizeCheckoutPath,
   SPACE_ACTIONS_MOD,
   parseTreeAgentSession,
+  contextMenuPosition,
 } from "../mods/git-graph/git-logic.js";
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
@@ -1649,4 +1650,241 @@ test("parseTreeAgentSession: parses session data for outcomes, errors, and justi
   const longResult = parseTreeAgentSession(longSession);
   assert.equal(longResult.justification.length, 248);
   assert.equal(longResult.justification.endsWith("…"), true);
+});
+
+test("contextMenuPosition: calculates pane-relative coordinates and flips or clamps within bounds", () => {
+  // 1. Standard mouse click with known origin (fits downward-right)
+  const pos1 = contextMenuPosition({
+    origin: { x: 100, y: 150 },
+    bounds: { x: 100, y: 150, width: 800, height: 600 },
+    width: 800,
+    height: 600,
+    event: { position: { x: 350, y: 300 } },
+    menuWidth: 260,
+    menuHeight: 180,
+  });
+  assert.deepEqual(pos1, { x: 250, y: 150 });
+
+  // 2. Uses bounds fallback when origin is missing
+  const pos2 = contextMenuPosition({
+    origin: null,
+    bounds: { x: 80, y: 120, width: 600, height: 500 },
+    width: 600,
+    height: 500,
+    event: { position: { x: 200, y: 220 } },
+    menuWidth: 240,
+    menuHeight: 190,
+  });
+  assert.deepEqual(pos2, { x: 120, y: 100 });
+
+  // 3. Fallback to defaults when event has no position
+  const pos3 = contextMenuPosition({
+    origin: { x: 50, y: 50 },
+    bounds: null,
+    width: 500,
+    height: 500,
+    event: null,
+    menuWidth: 200,
+    menuHeight: 150,
+    defaultX: 140,
+    defaultY: 80,
+  });
+  assert.deepEqual(pos3, { x: 140, y: 80 });
+
+  // 4. Override takes priority over event position
+  const pos4 = contextMenuPosition({
+    origin: { x: 100, y: 100 },
+    bounds: null,
+    width: 800,
+    height: 600,
+    event: { position: { x: 500, y: 500 } },
+    menuWidth: 200,
+    menuHeight: 150,
+    overrideX: 180,
+    overrideY: 90,
+  });
+  assert.deepEqual(pos4, { x: 180, y: 90 });
+
+  // 5. Flips to the left when right edge overflows and left has space
+  const pos5 = contextMenuPosition({
+    origin: { x: 100, y: 100 },
+    bounds: { x: 100, y: 100, width: 600, height: 500 },
+    width: 600,
+    height: 500,
+    event: { position: { x: 650, y: 200 } }, // x would be 550; 550 + 200 > 600
+    menuWidth: 200,
+    menuHeight: 150,
+  });
+  // x flips to x - menuWidth = 550 - 200 = 350
+  assert.equal(pos5.x, 350);
+  assert.equal(pos5.y, 100);
+
+  // 6. Flips upwards when bottom edge overflows and top has space
+  const pos6 = contextMenuPosition({
+    origin: { x: 100, y: 100 },
+    bounds: { x: 100, y: 100, width: 600, height: 500 },
+    width: 600,
+    height: 500,
+    event: { position: { x: 250, y: 550 } }, // y would be 450; 450 + 150 > 500
+    menuWidth: 200,
+    menuHeight: 150,
+  });
+  assert.equal(pos6.x, 150);
+  // y flips upwards to y - menuHeight = 450 - 150 = 300
+  assert.equal(pos6.y, 300);
+
+  // 7. Clamps when neither right nor left has enough space
+  const pos7 = contextMenuPosition({
+    origin: { x: 0, y: 0 },
+    bounds: null,
+    width: 300,
+    height: 400,
+    event: { position: { x: 180, y: 50 } }, // x = 180; 180 + 250 > 300; 180 - 250 = -70 < 10
+    menuWidth: 250,
+    menuHeight: 100,
+  });
+  // maxW - menuWidth - 10 = 300 - 250 - 10 = 40
+  assert.equal(pos7.x, 40);
+  assert.equal(pos7.y, 50);
+
+  // 8. Clamps when neither bottom nor top has enough space
+  const pos8 = contextMenuPosition({
+    origin: { x: 0, y: 0 },
+    bounds: null,
+    width: 400,
+    height: 250,
+    event: { position: { x: 50, y: 150 } }, // y = 150; 150 + 200 > 250; 150 - 200 = -50 < 10
+    menuWidth: 150,
+    menuHeight: 200,
+  });
+  assert.equal(pos8.x, 50);
+  // maxH - menuHeight - 10 = 250 - 200 - 10 = 40
+  assert.equal(pos8.y, 40);
+
+  // 9. When origin is known with window coordinates, correctly subtracts origin
+  const pos9 = contextMenuPosition({
+    origin: { x: 1352, y: 110 },
+    bounds: null,
+    width: 368,
+    height: 400,
+    event: {
+      position: { x: 1450, y: 242 },
+      bounds: { x: 1352, y: 230, width: 368, height: 24 },
+    },
+    menuWidth: 260,
+    menuHeight: 135,
+  });
+  // x = 1450 - 1352 = 98 (fits <= 368)
+  // y = 242 - 110 = 132 (132 + 135 = 267 <= 400)
+  assert.equal(pos9.x, 98);
+  assert.equal(pos9.y, 132);
+
+  // 10. Guards against window-space leakage when origin is unknown and event.position exceeds height
+  const pos10 = contextMenuPosition({
+    origin: null,
+    bounds: null,
+    width: 368,
+    height: 400,
+    event: {
+      position: { x: 1450, y: 850 },
+      local_position: { x: 50, y: 12 },
+    },
+    menuWidth: 260,
+    menuHeight: 135,
+    defaultY: 100,
+  });
+  assert.equal(pos10.y, 12);
+
+  // 11. Scales coordinates correctly with zoom: 1.1
+  const pos11 = contextMenuPosition({
+    origin: { x: 1000, y: 100 },
+    bounds: null,
+    width: 800,
+    height: 600,
+    zoom: 1.1,
+    event: { position: { x: 1220, y: 320 } },
+    menuWidth: 260,
+    menuHeight: 180,
+  });
+  // (1220 - 1000) / 1.1 = 200, (320 - 100) / 1.1 = 200
+  assert.deepEqual(pos11, { x: 200, y: 200 });
+
+  // 12. Derives maxW and maxH from bounds scaled by zoom when width/height are 0
+  const pos12 = contextMenuPosition({
+    origin: { x: 100, y: 100 },
+    bounds: { x: 100, y: 100, width: 880, height: 660 },
+    width: 0,
+    height: 0,
+    zoom: 1.1,
+    event: { position: { x: 320, y: 320 } },
+    menuWidth: 200,
+    menuHeight: 150,
+  });
+  // maxW = 880 / 1.1 = 800, maxH = 660 / 1.1 = 600
+  // x = (320 - 100) / 1.1 = 200, y = (320 - 100) / 1.1 = 200
+  assert.deepEqual(pos12, { x: 200, y: 200 });
+
+  // 13. Edge-margin flipping at 10px boundary (horizontal)
+  const pos13 = contextMenuPosition({
+    origin: { x: 0, y: 0 },
+    bounds: null,
+    width: 600,
+    height: 500,
+    event: { position: { x: 395, y: 100 } },
+    menuWidth: 200,
+    menuHeight: 150,
+  });
+  // 395 + 200 = 595 > 600 - 10 (590) -> flips left to 395 - 200 = 195
+  assert.equal(pos13.x, 195);
+  assert.equal(pos13.y, 100);
+
+  // 14. Edge-margin flipping at 10px boundary (vertical)
+  const pos14 = contextMenuPosition({
+    origin: { x: 0, y: 0 },
+    bounds: null,
+    width: 600,
+    height: 500,
+    event: { position: { x: 100, y: 345 } },
+    menuWidth: 200,
+    menuHeight: 150,
+  });
+  // 345 + 150 = 495 > 500 - 10 (490) -> flips upwards to 345 - 150 = 195
+  assert.equal(pos14.x, 100);
+  assert.equal(pos14.y, 195);
+
+  // 15. Fallback: paneX falls back to event.bounds.x when origin is missing
+  const pos15 = contextMenuPosition({
+    origin: null,
+    bounds: null,
+    width: 400,
+    height: 400,
+    zoom: 1.1,
+    event: {
+      position: { x: 1450, y: 242 },
+      bounds: { x: 1352, y: 230, width: 368, height: 24 },
+      local_position: { x: 50, y: 12 },
+    },
+    menuWidth: 200,
+    menuHeight: 100,
+  });
+  // paneX = 1352, x = Math.round((1450 - 1352) / 1.1) = Math.round(98 / 1.1) = 89
+  assert.equal(pos15.x, 89);
+
+  // 16. Window-space leakage guard scales local_position by zoom
+  const pos16 = contextMenuPosition({
+    origin: null,
+    bounds: null,
+    width: 400,
+    height: 400,
+    zoom: 1.1,
+    event: {
+      position: { x: 1450, y: 850 },
+      local_position: { x: 55, y: 33 },
+    },
+    menuWidth: 200,
+    menuHeight: 100,
+    defaultY: 100,
+  });
+  // y leaks (850 > 400), local_position.y / 1.1 = 33 / 1.1 = 30
+  assert.equal(pos16.y, 30);
 });
