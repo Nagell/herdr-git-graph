@@ -35,7 +35,34 @@ repo/
         └── assets...
 ```
 
-One repo can hold several mods, each in its own `mods/<name>/` folder (for example `ref-menu` + `tabs-ref`); document that they are installed together when they are one feature. Do not add a `layouts/` folder: a mod is a piece for an existing layout.
+One repo can hold several mods, each in its own `mods/<name>/` folder (for example `ref-menu` + `tabs-ref`). Do not add a `layouts/` folder: a mod is a piece for an existing layout.
+
+**Every mod must work alone.** People install, rename and turn off mods one folder at a time, so no mod may have a hard dependency on another custom mod (same repo or not):
+
+- Detect an optional mod by its manifest: ``readTextFile(`${appHome()}/mods/<name>/mod.json`)`` (null = absent). Re-check on a timer (about 5 s) in long-lived panels so installing or turning one off applies live; once per popup is enough.
+- Without it, fall back to Herdr's shipped equivalent (`menu`, `worktree`, `new-menu`, ...) or hide the feature. Never `openOverlay`/`tab.new`/`pane.split` with a mod that may be missing.
+- Never reference another custom mod's assets (`svg("mods/<other>/...")`): copy the icon into your own folder. Shipped mods' icons (`mods/workspace-chrome/...`) are fine.
+- Document the optional companions and their fallbacks in `README.md` and `RECIPE.md` (Watch out).
+
+### `mod.json` metadata
+
+Fill every field the Mods screen and listings show, the same way in every mod:
+
+```json
+{
+  "name": "git-graph",
+  "version": "0.1.1",
+  "title": "Git Graph",
+  "description": "Git graph with branch lanes, commit history, and diff tabs",
+  "place": "none"
+}
+```
+
+- `name`: kebab-case, identical to the folder name.
+- `title`: Title Case display name (the Mods screen falls back to the folder name without it, which reads inconsistently). Also used as a mod pane's title.
+- `version`: semver; bump it whenever the mod folder changes.
+- `description`: one line, sentence case, no trailing period.
+- Then `place`, `size`, `focusable`, `overlay`, and `cloned_from` last.
 
 ### Local loop
 
