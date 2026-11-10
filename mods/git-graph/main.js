@@ -446,13 +446,14 @@ export default class GitGraph extends View {
 
     this.handle = cx.focus_handle();
 
-    // Opening a changed file needs the file-editor mod. Re-check until it is
-    // present so installing it enables the button without reopening the tab.
+    // Opening a changed file needs the optional file-editor mod, and worktree
+    // switching the optional worktree-plus mod. Keep re-checking both, so
+    // installing or turning one off applies without reopening the tab.
     this.detectFileEditor(cx);
     this.detectSpaceActions(cx);
     cx.timer.every(15000, (cx) => {
-      if (this.fileEditorAvailable !== true) this.detectFileEditor(cx);
-      if (this.spaceActionsAvailable !== true) this.detectSpaceActions(cx);
+      this.detectFileEditor(cx);
+      this.detectSpaceActions(cx);
     });
 
     if (this.diffMode) {
