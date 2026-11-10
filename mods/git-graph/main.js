@@ -2576,7 +2576,9 @@ export default class GitGraph extends View {
 
   openCommitContextMenu(commit, e, cx, overrideX, overrideY) {
     const zoom = Number(settings()?.zoom) || 1;
-    const menuWidth = 240;
+    // Wide enough for "Rebase Current Branch on this Commit…"; a narrow panel caps it.
+    const narrow = this.width > 0 && this.width < 400;
+    const menuWidth = narrow ? Math.max(240, Math.min(300, this.width - 20)) : 300;
     const menuHeight = 310;
     const { x, y } = contextMenuPosition({
       origin: this.rootOrigin,
