@@ -8568,7 +8568,7 @@ export default class GitGraph extends View {
           .absolute()
           .left(cMenu.x)
           .top(cMenu.y)
-          .w(240)
+          .w(cMenu.menuWidth || 300)
           .p(4)
           .rounded(8)
           .bg(color(t.popover))
