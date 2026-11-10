@@ -2635,16 +2635,23 @@ export function parseTreeAgentSession(sessionData) {
     ? sessionData
     : [];
 
-  const errEntry = list.find((m) => m?.error?.message || m?.error?.type);
-  const error = errEntry?.error
+  const errEntry = list.find(
+    (m) =>
+      m?.error?.message ||
+      m?.error?.type ||
+      m?.retry?.error?.message ||
+      m?.retry?.error?.type
+  );
+  const rawErr = errEntry?.error || errEntry?.retry?.error;
+  const error = rawErr
     ? {
-        errorMessage: errEntry.error.message || errEntry.error.type,
-        errorType: errEntry.error.type,
+        errorMessage: rawErr.message || rawErr.type,
+        errorType: rawErr.type,
       }
     : null;
 
   const idleEntry = list.find((m) => m?.type === "idle");
-  const outcome = idleEntry?.outcome ?? null;
+  const outcome = idleEntry?.outcome ?? (error ? "failed" : null);
 
   let lastText = "";
   for (let i = list.length - 1; i >= 0; i--) {
@@ -2791,5 +2798,40 @@ export function contextMenuPosition({
   }
 
   return { x: Math.round(x), y: Math.round(y) };
+}
+
+/**
+ * Whether the agent's background terminal is currently being peeked.
+ * A peeked background terminal has no model pane (focused.pane is null)
+ * and its address matches the agent address (or ends with "/<address>" for remote machines).
+ *
+ * @param {{ terminal?: string | null; pane?: string | null } | null | undefined} focused
+ * @param {string | null | undefined} agentAddress
+ * @returns {boolean}
+ */
+export function isPeekingTerminal(focused, agentAddress) {
+  if (!focused || !agentAddress) return false;
+  const term = focused.terminal;
+  if (!term) return false;
+  // A peek overlay has no model pane
+  if (focused.pane !== null && focused.pane !== undefined) return false;
+  return term === agentAddress || term.endsWith("/" + agentAddress);
+}
+
+/**
+ * Evaluates peek state transition for an AI worker.
+ * Returns:
+ * - "opened" if peek just opened
+ * - "closed" if peek was open and is now closed
+ * - null if state did not transition
+ *
+ * @param {boolean} isPeeking
+ * @param {boolean} wasPeeking
+ * @returns {"opened" | "closed" | null}
+ */
+export function resolvePeekTransition(isPeeking, wasPeeking) {
+  if (isPeeking && !wasPeeking) return "opened";
+  if (!isPeeking && wasPeeking) return "closed";
+  return null;
 }
 

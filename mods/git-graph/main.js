@@ -35,6 +35,7 @@ import {
   layout,
   closeOverlay,
   appHome,
+  window as herdrWindow,
 } from "herdr";
 import {
   countLines,
@@ -98,6 +99,8 @@ import {
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
   contextMenuPosition,
+  isPeekingTerminal,
+  resolvePeekTransition,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -535,8 +538,9 @@ export default class GitGraph extends View {
       const justOpened = visible && !this.wasVisible;
       this.wasVisible = visible;
       if (justOpened || this.getKey() !== this.context) {
-        this.refresh(cx);
+        if (!this.loading) this.refresh(cx);
       }
+      this.syncTreeAgentPeek(cx);
     });
   }
 
@@ -556,7 +560,7 @@ export default class GitGraph extends View {
     const worker = this.getTreeAgent();
     if (worker?.toastId) {
       this.closeTreeAgentToast(worker);
-      this.setTreeAgent({ ...worker, toastId: null });
+      this.setTreeAgent({ ...worker, toastId: null, peekOpen: false });
     }
   }
 
@@ -1328,7 +1332,6 @@ export default class GitGraph extends View {
               .child(this.diffViewButton("stacked", "Stacked", "Old above new, both panes in sync", t, cx))
               .child(div().w(1).h(12).mx(2).bg(color(t.border)))
               .child(this.diffWrapButton(t, cx))
-          )
           .child(
             h_flex()
               .id("diff-tab-copy")
@@ -1645,6 +1648,7 @@ export default class GitGraph extends View {
     if (!root) return;
 
     this.loading = true;
+    cx.notify();
     cx.spawn(async (cx) => {
       try {
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
@@ -1684,8 +1688,10 @@ export default class GitGraph extends View {
 
   refresh(cx, options = {}) {
     if (this.loading) {
-      this.pendingRefresh = true;
-      if (options.remoteTags) this.pendingRemoteTags = true;
+      if (options.manual || options.remoteTags) {
+        this.pendingRefresh = true;
+        if (options.remoteTags) this.pendingRemoteTags = true;
+      }
       return;
     }
     const { cwd, on } = this.getLocation();
@@ -1697,12 +1703,14 @@ export default class GitGraph extends View {
     if (!cwd) return;
 
     this.loading = true;
+    cx.notify();
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (this.getKey() !== context) return;
         if (top.code !== 0) {
           this.root = null;
+          this.context = this.getKey();
           this.commits = [];
           this.filteredCommits = [];
           this.workingTreeFiles = [];
@@ -4100,7 +4108,7 @@ export default class GitGraph extends View {
     if (this.modalDialog) return;
 
     if (e.key === "r" && !this.typing) {
-      this.refresh(cx, { remoteTags: true });
+      this.refresh(cx, { remoteTags: true, manual: true });
       return;
     }
 
@@ -5612,6 +5620,7 @@ export default class GitGraph extends View {
                     const agent = this.getTreeAgent();
                     if (this.treeAgentBusy() && agent?.address) {
                       run("terminal.peek", { terminal: agent.address });
+                      this.syncTreeAgentPeek(cx);
                       return;
                     }
                     this.startTreeAgent(cx);
@@ -5823,11 +5832,10 @@ export default class GitGraph extends View {
   }
 
   /** True while this checkout's launched AI worker still owns the working tree. */
-  treeAgentBusy() {
-    const key = this.treeAgentKey();
+  treeAgentBusy(key = this.treeAgentKey()) {
     if (this.treeAgentStartingKeys.has(key)) return true;
     const agent = this.getTreeAgent(key);
-    if (!agent) return false;
+    if (!agent || agent.deferredStop) return false;
     // Once `hc run` returns, the worker keeps the button locked until its
     // session is done and the tree is clean (or its terminal is gone and the
     // finish check retires it).
@@ -6428,6 +6436,48 @@ export default class GitGraph extends View {
   }
 
   /**
+   * Watches whether the user is peeking at the background AI commit worker.
+   * Clicking the progress toast or peek button opens the peek overlay (which
+   * dismisses the toast). When the user closes the peek window, bringing back
+   * the persistent spinning progress toast keeps the worker visible.
+   *
+   * @param {import("./gpui-kit.js").Context} [cx]
+   */
+  syncTreeAgentPeek(cx) {
+    const win = herdrWindow();
+    if (win && win.active === false) return;
+    const f = focused();
+    for (const key of this.treeAgentKeys()) {
+      const agent = this.getTreeAgent(key);
+      if (!agent?.address) continue;
+      const isPeeking = isPeekingTerminal(f, agent.address);
+      const wasPeeking = Boolean(agent.peekOpen);
+      const transition = resolvePeekTransition(isPeeking, wasPeeking);
+      if (transition === "opened") {
+        const latest = this.getTreeAgent(key);
+        if (latest && latest.sessionId === agent.sessionId && !latest.peekOpen) {
+          this.setTreeAgent({ ...latest, peekOpen: true }, key);
+        }
+      } else if (transition === "closed") {
+        const latest = this.getTreeAgent(key);
+        if (latest && latest.sessionId === agent.sessionId && latest.peekOpen) {
+          this.setTreeAgent({ ...latest, peekOpen: false }, key);
+          if (this.treeAgentBusy(key)) {
+            this.closeTreeAgentToast(latest);
+            const model = latest.model || this.cleanAgentModelLabel();
+            const toastId = this.showTreeAgentProgressToast(latest, model);
+            const updated = this.getTreeAgent(key);
+            if (updated && updated.sessionId === latest.sessionId) {
+              this.setTreeAgent({ ...updated, toastId, peekOpen: false }, key);
+            }
+            if (cx) cx.notify();
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Polls every space's worker. Each copy of the mod runs this timer, so a run
    * that finishes while another space is selected still settles its toast and
    * terminal instead of waiting for that space to be shown again.
@@ -6435,6 +6485,7 @@ export default class GitGraph extends View {
    * @param {import("./gpui-kit.js").Context} cx
    */
   pollTreeAgents(cx) {
+    this.syncTreeAgentPeek(cx);
     for (const key of this.treeAgentKeys()) {
       const agent = this.getTreeAgent(key);
       if (agent) this.pollTreeAgent(cx, key, agent);
@@ -6491,10 +6542,32 @@ export default class GitGraph extends View {
         const session = payload?.data ?? payload;
         const time = session?.time ?? {};
         const started = time.busy || time.created;
-        const failed = session?.outcome === "failed" || session?.outcome === "error";
-        const busy = !failed && Boolean(started) && (!time.idle || time.idle < started);
+        let failed = session?.outcome === "failed" || session?.outcome === "error" || Boolean(session?.error);
+        let busy = !failed && Boolean(started) && (!time.idle || time.idle < started);
 
-        const error = failed && !agent.errorMessage ? await this.readTreeAgentError(agent) : {};
+        let error = {};
+        if (failed && !agent.errorMessage) {
+          const sessionInfo = await this.readTreeAgentSession(agent);
+          if (sessionInfo?.error) {
+            error = {
+              errorMessage: sessionInfo.error.errorMessage,
+              errorType: sessionInfo.error.errorType,
+            };
+          }
+        } else if (busy && !agent.errorMessage && (!agent.lastSessionCheck || Date.now() - agent.lastSessionCheck > 10000)) {
+          const sessionInfo = await this.readTreeAgentSession(agent);
+          if (sessionInfo?.error) {
+            failed = true;
+            busy = false;
+            error = {
+              errorMessage: sessionInfo.error.errorMessage,
+              errorType: sessionInfo.error.errorType,
+              lastSessionCheck: Date.now(),
+            };
+          } else {
+            error = { lastSessionCheck: Date.now() };
+          }
+        }
         // Re-read after the await: another copy may have claimed the worker
         // meanwhile, and writing back would revive it.
         const latest = this.getTreeAgent(key);
@@ -6591,7 +6664,7 @@ export default class GitGraph extends View {
     cx.spawn(async (cx) => {
       try {
         const now = terminals().find((t) => t.address === agent.address);
-        if (now && now.state === "live" && agent.busy !== false) return;
+        if (now && now.state === "live" && agent.busy !== false && !agent.failed) return;
 
         const status = await exec(
           "git",
@@ -6674,7 +6747,9 @@ export default class GitGraph extends View {
                 key
               );
               const isLimit =
-                err.errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(detail || "");
+                err.errorType === "provider.free-limit" ||
+                err.errorType === "provider.rate-limit" ||
+                /limit|quota|rate\s*limit|429/i.test(detail || "");
               notify({
                 title: isLimit ? "AI usage limit reached" : "AI commit worker stopped",
                 body: `${this.treeAgentWhere(agent)} · ${detail.slice(0, 300)} · Open its Git Graph to retry.`,
@@ -6729,7 +6804,10 @@ export default class GitGraph extends View {
       errorMessage = sessionInfo.error?.errorMessage;
       errorType = sessionInfo.error?.errorType;
     }
-    const isLimit = errorType === "provider.free-limit" || /limit|quota|rate\s*limit|429/i.test(errorMessage || "");
+    const isLimit =
+      errorType === "provider.free-limit" ||
+      errorType === "provider.rate-limit" ||
+      /limit|quota|rate\s*limit|429/i.test(errorMessage || "");
     const title = isLimit ? "AI usage limit reached" : "AI commit worker stopped";
     const detail = errorMessage
       ? errorMessage
@@ -7007,6 +7085,7 @@ export default class GitGraph extends View {
           found: false,
           busy: null,
           toastId: null,
+          peekOpen: false,
         };
         agent.toastId = this.showTreeAgentProgressToast(agent, model);
         this.setTreeAgent(agent, key);
@@ -7103,6 +7182,7 @@ export default class GitGraph extends View {
         const agent = this.getTreeAgent();
         if (busy && agent?.address) {
           run("terminal.peek", { terminal: agent.address });
+          this.syncTreeAgentPeek(cx);
           return;
         }
         if (this.opencodeInstalled === false) {
@@ -9305,9 +9385,7 @@ export default class GitGraph extends View {
       return this.renderDiffTab(cx);
     }
     const visible = this.isViewVisible();
-    const justOpened = visible && !this.wasVisible;
     this.wasVisible = visible;
-    if (justOpened || this.getKey() !== this.context) this.refresh(cx);
     const t = theme();
     const p = props();
     // Docked in a layout panel (Herdr's Changes slot, for example): draw a card
@@ -9521,8 +9599,14 @@ export default class GitGraph extends View {
               .border_1()
               .border_color(color(t.border))
               .hover((s) => s.bg(color(t.hover)))
-              .on_click((_e, cx) => this.refresh(cx, { remoteTags: true }))
-              .child(svg("mods/git-graph/icons/refresh.svg").size(12).text_color(color(t.dim)))
+              .tooltip(this.loading ? "Refreshing git graph…" : "Refresh git graph (r)")
+              .on_click((_e, cx) => this.refresh(cx, { remoteTags: true, manual: true }))
+              .child(
+                svg("mods/git-graph/icons/refresh.svg")
+                  .size(12)
+                  .text_color(color(this.loading ? t.accent : t.dim))
+                  .when(this.loading, (el) => el.spin(900))
+              )
           )
           // From a docked panel, open this repository full size in a tab.
           .when(panelMode, (e) =>

@@ -65,6 +65,8 @@ import {
   SPACE_ACTIONS_MOD,
   parseTreeAgentSession,
   contextMenuPosition,
+  isPeekingTerminal,
+  resolvePeekTransition,
 } from "../mods/git-graph/git-logic.js";
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
@@ -1653,6 +1655,28 @@ test("parseTreeAgentSession: parses session data for outcomes, errors, and justi
   });
   assert.equal(errorResult.outcome, "failed");
 
+  // Session with retry error (e.g. rate limit in retry loop without an idle event yet)
+  const retrySession = [
+    {
+      type: "assistant",
+      retry: {
+        attempt: 2,
+        error: {
+          message: "Rate limit exceeded. Please try again later.",
+          type: "provider.rate-limit",
+          status: 429,
+          retryAfterMs: 13609000,
+        },
+      },
+    },
+  ];
+  const retryResult = parseTreeAgentSession(retrySession);
+  assert.deepEqual(retryResult.error, {
+    errorMessage: "Rate limit exceeded. Please try again later.",
+    errorType: "provider.rate-limit",
+  });
+  assert.equal(retryResult.outcome, "failed");
+
   // Long text truncation for notification toast
   const longText = "A".repeat(300);
   const longSession = {
@@ -1903,4 +1927,31 @@ test("contextMenuPosition: calculates pane-relative coordinates and flips or cla
   });
   // y leaks (850 > 400), local_position.y / 1.1 = 33 / 1.1 = 30
   assert.equal(pos16.y, 30);
+});
+
+test("isPeekingTerminal: identifies peeked terminals and rejects model panes", () => {
+  assert.equal(isPeekingTerminal(null, "term1"), false);
+  assert.equal(isPeekingTerminal({ terminal: "term1" }, null), false);
+  assert.equal(isPeekingTerminal({ terminal: null, pane: null }, "term1"), false);
+
+  // When focused in a model pane (pane is not null), it is not a peek overlay
+  assert.equal(isPeekingTerminal({ terminal: "term1", pane: "pane1" }, "term1"), false);
+  assert.equal(isPeekingTerminal({ terminal: "remote/term1", pane: "pane1" }, "term1"), false);
+
+  // In a peek overlay, pane is null and terminal matches
+  assert.equal(isPeekingTerminal({ terminal: "term1", pane: null }, "term1"), true);
+  assert.equal(isPeekingTerminal({ terminal: "remote/term1", pane: null }, "term1"), true);
+  assert.equal(isPeekingTerminal({ terminal: "other_term", pane: null }, "term1"), false);
+  assert.equal(isPeekingTerminal({ terminal: "remote/other_term", pane: null }, "term1"), false);
+});
+
+test("resolvePeekTransition: detects opened and closed state transitions", () => {
+  // Opening peek
+  assert.equal(resolvePeekTransition(true, false), "opened");
+  // Staying open
+  assert.equal(resolvePeekTransition(true, true), null);
+  // Closing peek
+  assert.equal(resolvePeekTransition(false, true), "closed");
+  // Staying closed
+  assert.equal(resolvePeekTransition(false, false), null);
 });
