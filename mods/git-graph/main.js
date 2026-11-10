@@ -253,11 +253,19 @@ function resolveLocation(manualRoot, currentRoot) {
 
   // 1. The terminal you are looking at: the graph follows it, unless it is
   //    already inside the repo on screen.
+  const normAlias = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/Documents\/Workspaces(?=\/|$)/, "/workspaces");
   const focusedPane = mine && f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const focusedCwd = focusedPane?.cwd || (mine && f?.terminal ? f?.cwd : null);
   if (focusedCwd) {
-    if (currentRoot && (focusedCwd === currentRoot || focusedCwd.startsWith(currentRoot + "/"))) {
-      return { cwd: currentRoot, on };
+    if (currentRoot) {
+      if (focusedCwd === currentRoot || focusedCwd.startsWith(currentRoot + "/")) {
+        return { cwd: currentRoot, on };
+      }
+      const normRoot = normAlias(currentRoot);
+      const normCwd = normAlias(focusedCwd);
+      if (normRoot && (normCwd === normRoot || normCwd.startsWith(normRoot + "/"))) {
+        return { cwd: currentRoot, on };
+      }
     }
     return { cwd: focusedCwd, on };
   }
@@ -265,8 +273,15 @@ function resolveLocation(manualRoot, currentRoot) {
   // 2. The terminal in this mod's own tab: the pane it was split beside.
   const activeTabPane = mine ? panes().find((p) => p.tab === f?.tab && p.cwd && !p.mod) : null;
   if (activeTabPane?.cwd) {
-    if (currentRoot && (activeTabPane.cwd === currentRoot || activeTabPane.cwd.startsWith(currentRoot + "/"))) {
-      return { cwd: currentRoot, on };
+    if (currentRoot) {
+      if (activeTabPane.cwd === currentRoot || activeTabPane.cwd.startsWith(currentRoot + "/")) {
+        return { cwd: currentRoot, on };
+      }
+      const normRoot = normAlias(currentRoot);
+      const normCwd = normAlias(activeTabPane.cwd);
+      if (normRoot && (normCwd === normRoot || normCwd.startsWith(normRoot + "/"))) {
+        return { cwd: currentRoot, on };
+      }
     }
     return { cwd: activeTabPane.cwd, on };
   }

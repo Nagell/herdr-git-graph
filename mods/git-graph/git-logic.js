@@ -11,10 +11,23 @@
  * @param {string | null | undefined} cwd
  * @returns {string | null}
  */
+function normalizePathAlias(p) {
+  if (!p) return "";
+  const s = String(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  return s.replace(/\/Documents\/Workspaces(?=\/|$)/, "/workspaces");
+}
+
 export function computeEffectiveRoot(currentRoot, cwd) {
   if (!cwd) return null;
-  if (currentRoot && (cwd === currentRoot || cwd.startsWith(currentRoot + "/"))) {
-    return currentRoot;
+  if (currentRoot) {
+    if (cwd === currentRoot || cwd.startsWith(currentRoot + "/")) {
+      return currentRoot;
+    }
+    const normRoot = normalizePathAlias(currentRoot);
+    const normCwd = normalizePathAlias(cwd);
+    if (normRoot && (normCwd === normRoot || normCwd.startsWith(normRoot + "/"))) {
+      return currentRoot;
+    }
   }
   return cwd;
 }

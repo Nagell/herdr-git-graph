@@ -121,6 +121,22 @@ test("computeEffectiveRoot: handles repo switching, subdirectories, and empty lo
     "/path/to/repoA"
   );
 
+  // Path alias (e.g. /Documents/Workspaces symlink to /workspaces)
+  assert.equal(
+    computeEffectiveRoot(
+      "/Users/pablowerlang/workspaces/herdr/herdr-git-graph",
+      "/Users/pablowerlang/Documents/Workspaces/herdr/herdr-git-graph"
+    ),
+    "/Users/pablowerlang/workspaces/herdr/herdr-git-graph"
+  );
+  assert.equal(
+    computeEffectiveRoot(
+      "/Users/pablowerlang/Documents/Workspaces/herdr/herdr-git-graph",
+      "/Users/pablowerlang/workspaces/herdr/herdr-git-graph/mods/git-graph"
+    ),
+    "/Users/pablowerlang/Documents/Workspaces/herdr/herdr-git-graph"
+  );
+
   // Subdirectory inside current repo preserves current root
   assert.equal(
     computeEffectiveRoot("/path/to/repoA", "/path/to/repoA/mods/git-graph"),
