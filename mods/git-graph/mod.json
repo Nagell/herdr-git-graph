@@ -1,8 +1,8 @@
 {
   "name": "git-graph",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "title": "Git Graph",
-  "description": "Git graph with branch lanes, commit history, working-tree inspection, stash rows, and diff tabs",
+  "description": "Git graph with branch lanes, commit history, staging and committing, stash rows, and diff tabs",
   "place": "none",
   "focusable": true
 }

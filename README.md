@@ -51,23 +51,30 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
 - **Stash Rows**:
   - Every `git stash` entry renders above the working tree as its own row: hollow stash node, `stash@{n}` pill, reflog subject, relative date, author, and stash commit.
   - Clicking a stash shows its changed files in the details tree and opens normal diff tabs. Right-click for **Unstash (Pop)**, **Apply Stash (Keep)**, **Drop Stash**, and copy actions.
-  - Right-click the WIP row for **Stash All Changes…** (optional message, include-untracked toggle), **Stash Staged Changes…**, or **Unstash Latest…**.
+  - Right-click the WIP row for **Stash All Changes…** (optional message, include-untracked toggle), **Stash Staged Changes…**, or **Unstash Latest…** (next to the staging actions below).
 - **Working Tree Inspection**:
   - Real-time detection of dirty working trees via `git status` and diff statistics.
   - Dedicated top "WIP" row displaying uncommitted changes with `+add` / `−del` counters.
   - Full inspection of modified, added, deleted, and untracked files, each diff opening in its own tab.
-  - Right-click the WIP row to **Stash All Changes…** (with an optional message and include-untracked toggle), **Stash Staged Changes…**, or **Unstash Latest…**.
+  - Right-click the WIP row to **Stage All Changes** (`git add --all`), **Unstage All**, **Discard All Changes…**, **Stash All Changes…** (with an optional message and include-untracked toggle), **Stash Staged Changes…**, or **Unstash Latest…**.
+  - **Discard All Changes…** confirms with the file count and restores tracked files to HEAD (staged and unstaged edits). Untracked files, and newly added files after they are unstaged, are kept unless the dialog's **Also delete N untracked files** toggle (off by default) is turned on, which then runs `git clean -fd`. Ignored files are never deleted.
   - The branch dropdown lists existing stashes even when the tree is clean, and restoring one opens a confirmation and runs `git stash pop --index`.
+- **Staging & Committing** (working tree selected):
+  - The file list splits into a **Staged Changes** group (index vs HEAD) and a **Changes** group (working tree vs index, plus untracked files), like VS Code. A partly staged file appears in both groups, each with that side's status letter and `+`/`−` counts. Clicking a group header collapses it.
+  - Right-clicking a working-tree file adds **Stage** (`git add`; on a conflicted file it marks the conflict resolved), **Unstage** (`git restore --staged`, or `git rm --cached` before the first commit), and **Discard Changes…** above Show Diff / Show File / Copy File Path. Stage and Unstage both appear for a partly staged file.
+  - **Discard Changes…** confirms first and says it cannot be undone. A tracked file is restored from HEAD in both the index and the working tree; an untracked file is deleted with `git clean -f`; a new file staged as added is removed from the index and deleted. The dialog names which of these will happen.
+  - A commit box above the file list: a multi-line message field, an **Amend** toggle, and a **Commit** button. Commit runs `git commit -m <message>` on the staged changes only and is disabled with a hint while nothing is staged or the message is empty. Amend loads HEAD's message (turning it off brings the earlier draft back), adds any staged changes to HEAD, and warns in the box when HEAD is already on its upstream. On success the box clears and a toast names the new commit; when git or a hook refuses, its stderr is shown under the field.
+  - Every action refreshes the graph and file list. Paths are passed as literal pathspecs, git runs in the repository root the graph resolved (linked worktrees included), and no shell is involved.
 - **VS Code-Style Changed Files Tree**:
-  - A fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder.
+  - For a commit or stash, a fixed **Changes** group header with a count badge and a chevron that collapses or expands every folder. The working tree shows **Staged Changes** and **Changes** groups instead (see Staging & Committing).
   - Nested folders with indentation guide lines, chevrons, and the Material folder icon.
   - Full-color Material Icon Theme icons per file, chosen by exact name or extension (`fileIconPath` in `git-logic.js`), with `_light` variants on light themes — the same icon pattern as the File Editor mod.
   - Hovering a file reveals an **Open in file editor** button beside its name. It opens the current file in the optional `file-editor` mod, reuses that mod's live tab, and keeps the slot reserved so file names never shift. Without the mod the button is disabled and explains how to enable the feature.
-  - Right-clicking a file row opens its context menu: **Show Diff**, **Show File**, and **Copy File Path**. **Show Diff** is disabled for binary non-diffable files; Show File is disabled with the install hint when `file-editor` is missing; Copy File Path copies the absolute path.
+  - Right-clicking a file row opens its context menu: **Show Diff**, **Show File**, and **Copy File Path** (working-tree files also get Stage / Unstage / Discard Changes…). **Show Diff** is disabled for binary non-diffable files; Show File is disabled with the install hint when `file-editor` is missing; Copy File Path copies the absolute path.
   - Porcelain status letters on the right: Added (green/`ansi2`), Deleted (red/`ansi1`), Modified (blue/`ansi4`), Conflict (yellow/`ansi3`).
   - Colored per-file `+added` / `−deleted` counts beside the status letter (green/red); untracked diffable text files also show `+N` by counting their lines. The hover tooltip keeps the full path and status label.
   - The details pane below the graph is resizable: drag the divider to change how much of the panel belongs to the commit list and how much to the changed-file tree.
-  - The commit message wraps and expands with its content up to a readable cap, then scrolls, so the description is never clipped.
+  - The commit message wraps and expands with its content up to a readable cap, then scrolls, so the description is never clipped. With the working tree selected, the commit box takes its place.
 - **Full-Size Diff Tabs**:
   - Clicking a diffable file in the changed-files tree opens its diff in a dedicated Herdr tab (`Diff · <file>`): the tab header shows the file's Material icon, and the body is a virtualized editor with old/new line gutters, green/red change backgrounds, styled hunk headers, and horizontal scrolling for long lines. Non-diffable binary files (`.png`, images, audio, video, archives, binaries) are not diffable and do not open diff tabs.
   - Three layouts, switchable from the tab toolbar and remembered across tabs: **Inline** (unified), **Split** (old and new side by side), and **Stacked** (old above new). Both split panes share one vertical scroll position and keep their own horizontal scrollbar.

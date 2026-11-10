@@ -67,7 +67,97 @@ import {
   contextMenuPosition,
   isPeekingTerminal,
   resolvePeekTransition,
+  workingTreeState,
+  parseNumstat,
+  stageArgs,
+  unstageArgs,
+  discardFileArgs,
+  stageAllArgs,
+  unstageAllArgs,
+  discardAllArgs,
+  commitArgs,
 } from "../mods/git-graph/git-logic.js";
+
+test("workingTreeState: splits index and working-tree sides", () => {
+  assert.deepEqual(workingTreeState("MM"), {
+    fresh: false,
+    conflict: false,
+    staged: true,
+    unstaged: true,
+    inHead: true,
+    indexStatus: "M",
+    worktreeStatus: "M",
+  });
+  const untracked = workingTreeState("??");
+  assert.equal(untracked.staged, false);
+  assert.equal(untracked.unstaged, true);
+  assert.equal(untracked.inHead, false);
+  assert.equal(untracked.worktreeStatus, "A");
+  const added = workingTreeState("A ");
+  assert.equal(added.staged, true);
+  assert.equal(added.unstaged, false);
+  assert.equal(added.inHead, false);
+  assert.equal(workingTreeState(" D").worktreeStatus, "D");
+  assert.equal(workingTreeState("D ").indexStatus, "D");
+  const conflict = workingTreeState("UU");
+  assert.equal(conflict.staged, false);
+  assert.equal(conflict.unstaged, true);
+  assert.equal(conflict.inHead, true);
+  assert.equal(conflict.indexStatus, "U");
+  assert.equal(workingTreeState("DU").inHead, false);
+  assert.equal(workingTreeState("UA").inHead, false);
+  assert.equal(workingTreeState("AA").inHead, false);
+});
+
+test("parseNumstat: reads counts, binaries and tab-containing paths", () => {
+  const stats = parseNumstat("3\t1\ta.txt\0-\t-\timg.png\0" + "2\t0\tdir/we\tird.txt\0");
+  assert.deepEqual(stats.get("a.txt"), { add: 3, del: 1, binary: false });
+  assert.deepEqual(stats.get("img.png"), { add: 0, del: 0, binary: true });
+  assert.deepEqual(stats.get("dir/we\tird.txt"), { add: 2, del: 0, binary: false });
+  assert.equal(parseNumstat("").size, 0);
+});
+
+test("stage/unstage args: literal pathspecs, no HEAD before the first commit", () => {
+  assert.deepEqual(stageArgs("*.js"), ["--literal-pathspecs", "add", "--", "*.js"]);
+  assert.deepEqual(unstageArgs("-x", true), ["--literal-pathspecs", "restore", "--staged", "--", "-x"]);
+  assert.deepEqual(unstageArgs("a", false), ["--literal-pathspecs", "rm", "--cached", "--quiet", "--", "a"]);
+  assert.deepEqual(stageAllArgs(), ["add", "--all"]);
+  assert.deepEqual(unstageAllArgs(true), ["restore", "--staged", "--", "."]);
+  assert.deepEqual(unstageAllArgs(false), ["rm", "-r", "--cached", "--quiet", "--", "."]);
+});
+
+test("discardFileArgs: cleans untracked, deletes new files, restores tracked", () => {
+  assert.deepEqual(discardFileArgs("u", workingTreeState("??")), {
+    args: ["--literal-pathspecs", "clean", "-f", "--", "u"],
+    deletes: true,
+  });
+  assert.deepEqual(discardFileArgs("n", workingTreeState("AM")), {
+    args: ["--literal-pathspecs", "rm", "-f", "--quiet", "--", "n"],
+    deletes: true,
+  });
+  assert.deepEqual(discardFileArgs("t", workingTreeState("MM")), {
+    args: ["--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--worktree", "--", "t"],
+    deletes: false,
+  });
+});
+
+test("discardAllArgs: keeps untracked files unless asked", () => {
+  assert.deepEqual(discardAllArgs({ hasHead: true, hasStaged: true, hasTracked: true, deleteUntracked: false }), [
+    ["restore", "--staged", "--", "."],
+    ["restore", "--worktree", "--", "."],
+  ]);
+  assert.deepEqual(discardAllArgs({ hasHead: true, hasStaged: false, hasTracked: false, deleteUntracked: true }), [
+    ["clean", "-f", "-d", "--", "."],
+  ]);
+  assert.deepEqual(discardAllArgs({ hasHead: false, hasStaged: true, hasTracked: false, deleteUntracked: false }), [
+    ["rm", "-r", "--cached", "--quiet", "--", "."],
+  ]);
+});
+
+test("commitArgs: one -m argument keeps the message verbatim", () => {
+  assert.deepEqual(commitArgs("feat: x\n\nbody", false), ["commit", "-m", "feat: x\n\nbody"]);
+  assert.deepEqual(commitArgs("-starts with dash", true), ["commit", "--amend", "-m", "-starts with dash"]);
+});
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
   const layout = {

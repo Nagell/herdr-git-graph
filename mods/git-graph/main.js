@@ -8,6 +8,8 @@ import {
   h_flex,
   InputState,
   Input,
+  TextareaState,
+  Textarea,
   v_virtual_list,
   Scrollbar,
   VirtualListScrollHandle,
@@ -101,6 +103,15 @@ import {
   contextMenuPosition,
   isPeekingTerminal,
   resolvePeekTransition,
+  workingTreeState,
+  parseNumstat,
+  stageArgs,
+  unstageArgs,
+  discardFileArgs,
+  stageAllArgs,
+  unstageAllArgs,
+  discardAllArgs,
+  commitArgs,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -383,6 +394,7 @@ export default class GitGraph extends View {
     // Every checkout of this repo from `git worktree list` (see parseWorktreeList).
     this.checkouts = [];
     this.collapsedFolders = new Set();
+    this.collapsedGroups = new Set(); // "staged" / "changes" in the working-tree list
     this.diffRows = [];
     this.diffLeft = [];
     this.diffRight = [];
@@ -492,6 +504,27 @@ export default class GitGraph extends View {
     }
 
     this.searchInput = InputState.new({ placeholder: "Filter commits, authors, hashes, refs…" });
+    // Commit box shown with the working tree. Enter makes a new line; only the
+    // button commits.
+    this.commitInput = TextareaState.new({ placeholder: "Commit message", rows: 3 });
+    this.commitMessage = "";
+    this.commitTyping = false;
+    this.commitAmend = false;
+    this.commitDraft = ""; // the message typed before Amend replaced it
+    this.commitError = null;
+    this.commitInput.on("change", (_e, cx) => {
+      this.commitMessage = this.commitInput.value();
+      this.commitError = null;
+      cx.notify();
+    });
+    this.commitInput.on("focus", (_e, cx) => {
+      this.commitTyping = true;
+      cx.notify();
+    });
+    this.commitInput.on("blur", (_e, cx) => {
+      this.commitTyping = false;
+      cx.notify();
+    });
     // OpenCode Mini does not report agent status; follow its session instead.
     // A worker may already be running, so settle it once right away.
     if (this.hasTreeAgent()) {
@@ -1811,6 +1844,7 @@ export default class GitGraph extends View {
           this.remoteTagsToken = null;
           this.commitDetailsCache.clear();
           this.checkouts = [];
+          this.resetCommitBox();
           cx.notify();
         }
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
@@ -1849,22 +1883,29 @@ export default class GitGraph extends View {
         let ahead = 0;
         let behind = 0;
         let diffResults = [];
+        // Per-side counts for the Staged Changes / Changes groups.
+        let stagedRes = null;
+        let unstagedRes = null;
 
         if (hasHead) {
           const secondary = [
             git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]),
             git(["diff", "HEAD", "--numstat", "-z", "--no-renames"]),
+            git(["diff", "--cached", "--numstat", "-z", "--no-renames"]),
+            git(["diff", "--numstat", "-z", "--no-renames"]),
           ];
           if (!currentBranch) {
             secondary.push(git(["rev-parse", "--short", "HEAD"]));
           }
-          const [upstreamRes, headDiffRes, shortHeadRes] = await Promise.all(secondary);
+          const [upstreamRes, headDiffRes, cachedRes, worktreeRes, shortHeadRes] = await Promise.all(secondary);
           if (this.getKey() !== context) return;
 
           if (!currentBranch) {
             currentBranch = shortHeadRes?.code === 0 ? shortHeadRes.stdout.trim() : "HEAD";
           }
           diffResults = [headDiffRes];
+          stagedRes = cachedRes;
+          unstagedRes = worktreeRes;
 
           if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) {
             upstream = upstreamRes.stdout.trim();
@@ -1882,6 +1923,7 @@ export default class GitGraph extends View {
             git(["diff", "--numstat", "-z", "--no-renames"]),
           ]);
           if (this.getKey() !== context) return;
+          [stagedRes, unstagedRes] = diffResults;
         }
 
         // Available local and remote branches
@@ -1948,6 +1990,8 @@ export default class GitGraph extends View {
             }
           }
 
+          const stagedStats = parseNumstat(stagedRes?.code === 0 ? stagedRes.stdout : "");
+          const unstagedStats = parseNumstat(unstagedRes?.code === 0 ? unstagedRes.stdout : "");
           const statusEntries = statusRes.stdout.split("\0").filter(Boolean);
           for (const entry of statusEntries.slice(0, 1000)) {
             const xy = entry.slice(0, 2);
@@ -1957,7 +2001,19 @@ export default class GitGraph extends View {
             if (!conflict && xy[0] !== " " && xy[0] !== "?") stagedCount++;
             const s = conflict ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
             const stat = stats[filePath] ?? { add: 0, del: 0, binary: false };
-            wtFiles.push({ path: filePath, status: s, fresh, ...stat });
+            const staged = stagedStats.get(filePath);
+            const unstaged = unstagedStats.get(filePath);
+            wtFiles.push({
+              path: filePath,
+              status: s,
+              fresh,
+              ...stat,
+              state: workingTreeState(xy),
+              stagedAdd: staged?.add ?? 0,
+              stagedDel: staged?.del ?? 0,
+              unstagedAdd: unstaged?.add ?? 0,
+              unstagedDel: unstaged?.del ?? 0,
+            });
           }
 
           // Untracked files line count: count lines only for diffable text files.
@@ -2907,10 +2963,10 @@ export default class GitGraph extends View {
     cx.notify();
   }
 
-  /** Right-click menu for the Working Tree row: stash and restore changes. */
+  /** Right-click menu for the Working Tree row: stage, discard, stash and restore changes. */
   openWorkingTreeContextMenu(e, cx, overrideX, overrideY) {
     const menuWidth = 260;
-    const menuHeight = 190;
+    const menuHeight = 240;
     const zoom = Number(settings()?.zoom) || 1;
     const { x, y } = contextMenuPosition({
       origin: this.rootOrigin,
@@ -2942,7 +2998,9 @@ export default class GitGraph extends View {
     if (!file || file.isDir) return;
     const narrow = this.width > 0 && this.width < 400;
     const menuWidth = narrow ? Math.max(200, Math.min(260, this.width - 20)) : 280;
-    const menuHeight = 135;
+    const state = this.selectedCommit?.isWorkingTree ? file.file?.state : null;
+    const stageItems = state ? Number(state.staged) + Number(state.unstaged) + 1 : 0;
+    const menuHeight = 135 + (stageItems ? stageItems * 26 + 7 : 0);
     const zoom = Number(settings()?.zoom) || 1;
     const { x, y } = contextMenuPosition({
       origin: this.rootOrigin,
@@ -3059,6 +3117,23 @@ export default class GitGraph extends View {
       });
       this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
       this.focusModalInput(cx);
+    } else if (type === "discard-file") {
+      const file = target.file;
+      this.modalDialog = { type, file, deletes: discardFileArgs(file.path, file.state).deletes, error: null };
+      this.modalInput = null;
+    } else if (type === "discard-all") {
+      const states = this.workingTreeFiles.map((f) => f.state).filter(Boolean);
+      this.modalDialog = {
+        type,
+        fileCount: this.workingTreeFiles.length,
+        trackedCount: states.filter((s) => s.inHead).length,
+        newCount: states.filter((s) => !s.inHead).length,
+        addedCount: states.filter((s) => !s.inHead && !s.fresh).length,
+        hasStaged: states.some((s) => s.staged || s.conflict),
+        deleteUntracked: false,
+        error: null,
+      };
+      this.modalInput = null;
     } else if (type === "unstash" || type === "drop-stash") {
       this.modalDialog = {
         type,
@@ -3335,6 +3410,11 @@ export default class GitGraph extends View {
     }
     if (type === "confirm-merge-branch" && !ref?.text) {
       dialog.error = "No branch selected";
+      cx.notify();
+      return;
+    }
+    if (type === "discard-all" && !dialog.trackedCount && !dialog.hasStaged && !dialog.deleteUntracked) {
+      dialog.error = "Only untracked files changed; turn on deleting them to discard.";
       cx.notify();
       return;
     }
@@ -3624,6 +3704,51 @@ export default class GitGraph extends View {
           } else {
             fail((r.stderr || r.stdout).trim().slice(0, 800) || `Failed to drop ${stashRef}`);
           }
+        } else if (type === "discard-file") {
+          const file = dialog.file;
+          const { args, deletes } = discardFileArgs(file.path, file.state);
+          const r = await exec("git", [...NON_INTERACTIVE, ...args], { cwd: root, on });
+          if (r.code === 0) {
+            this.closeModal(cx);
+            notify({
+              title: deletes ? "File deleted" : "Changes discarded",
+              body: deletes ? `Deleted ${file.path}.` : `Restored ${file.path} to HEAD.`,
+              level: "success",
+            });
+          } else {
+            fail((r.stderr || r.stdout).trim().slice(0, 800) || `Failed to discard ${file.path}`);
+          }
+          this.refresh(cx);
+        } else if (type === "discard-all") {
+          const steps = discardAllArgs({
+            hasHead: this.hasHead,
+            hasStaged: dialog.hasStaged,
+            hasTracked: dialog.trackedCount > 0,
+            deleteUntracked: dialog.deleteUntracked,
+          });
+          let error = null;
+          for (const args of steps) {
+            const r = await exec("git", [...NON_INTERACTIVE, ...args], { cwd: root, on });
+            if (r.code !== 0) {
+              error = (r.stderr || r.stdout).trim().slice(0, 800) || `git ${args.join(" ")} failed`;
+              break;
+            }
+          }
+          if (error) {
+            fail(error);
+          } else {
+            this.closeModal(cx);
+            notify({
+              title: "Changes discarded",
+              body: dialog.deleteUntracked
+                ? "All changes discarded and untracked files deleted."
+                : dialog.newCount
+                  ? `Tracked changes discarded; ${dialog.newCount} untracked file${dialog.newCount === 1 ? " was" : "s were"} kept.`
+                  : "All changes discarded.",
+              level: "success",
+            });
+          }
+          this.refresh(cx);
         } else if (type === "reset") {
           const mode = dialog.resetMode || "mixed";
           const r = await exec("git", [...NON_INTERACTIVE, "reset", `--${mode}`, "--end-of-options", commit.hash], { cwd: root, on });
@@ -4115,6 +4240,154 @@ export default class GitGraph extends View {
     });
   }
 
+  /**
+   * Runs git commands one after another in the repository root, stopping at
+   * the first failure, then refreshes the graph and file list. Stage and
+   * unstage only toast on failure: the file moving between groups is the
+   * feedback.
+   *
+   * @param {string[][]} steps
+   * @param {{ failTitle: string, success?: { title: string, body: string } }} messages
+   */
+  runWorkingTreeSteps(steps, { failTitle, success }, cx) {
+    if (!this.root || this.busy || !steps.length) return;
+    const root = this.root;
+    const on = this.on;
+    this.busy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let error = null;
+      try {
+        for (const args of steps) {
+          const r = await exec("git", [...NON_INTERACTIVE, ...args], { cwd: root, on });
+          if (r.code !== 0) {
+            error = (r.stderr || r.stdout).trim().slice(0, 800) || `git ${args.join(" ")} failed`;
+            break;
+          }
+        }
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+      } finally {
+        this.busy = false;
+        if (error) notify({ title: failTitle, body: error, level: "error" });
+        else if (success) notify({ ...success, level: "success" });
+        this.refresh(cx);
+        cx.notify();
+      }
+    });
+  }
+
+  stageFile(file, cx) {
+    this.runWorkingTreeSteps([stageArgs(file.path)], { failTitle: "Stage failed" }, cx);
+  }
+
+  unstageFile(file, cx) {
+    this.runWorkingTreeSteps([unstageArgs(file.path, this.hasHead)], { failTitle: "Unstage failed" }, cx);
+  }
+
+  stageAll(cx) {
+    this.runWorkingTreeSteps([stageAllArgs()], { failTitle: "Stage all failed" }, cx);
+  }
+
+  unstageAll(cx) {
+    this.runWorkingTreeSteps([unstageAllArgs(this.hasHead)], { failTitle: "Unstage all failed" }, cx);
+  }
+
+  /** True when HEAD is already contained in its upstream, so amending it rewrites pushed history. */
+  headIsPushed() {
+    return Boolean(this.upstream) && this.hasHead && this.ahead === 0;
+  }
+
+  resetCommitBox() {
+    this.commitTyping = false;
+    this.commitAmend = false;
+    this.commitDraft = "";
+    this.commitError = null;
+    this.commitMessage = "";
+    this.commitInput?.set_value("");
+  }
+
+  /** Amend on loads HEAD's message into the box; amend off brings back the draft. */
+  toggleCommitAmend(cx) {
+    if (this.busy) return;
+    if (this.commitAmend) {
+      this.commitAmend = false;
+      this.commitError = null;
+      this.commitInput.set_value(this.commitDraft);
+      this.commitMessage = this.commitDraft;
+      cx.notify();
+      return;
+    }
+    if (!this.hasHead || !this.root) return;
+    const root = this.root;
+    const on = this.on;
+    this.commitAmend = true;
+    this.commitDraft = this.commitInput.value();
+    this.commitError = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const r = await exec("git", [...READ, "log", "-1", "--format=%B", "HEAD"], { cwd: root, on });
+      // The person may have turned amend off again while git was answering.
+      if (!this.commitAmend || this.root !== root) return;
+      if (r.code === 0) {
+        const message = r.stdout.replace(/\s+$/, "");
+        this.commitInput.set_value(message);
+        this.commitMessage = message;
+      } else {
+        this.commitError = (r.stderr || r.stdout).trim() || "Could not read the HEAD commit message";
+      }
+      cx.notify();
+    });
+  }
+
+  /** Why the Commit button is disabled, or null when it can run. */
+  commitBlocker() {
+    if (this.commitAmend && !this.hasHead) return "Nothing to amend yet";
+    if (!this.commitAmend && this.stagedCount === 0) return "Stage changes to commit";
+    if (!this.commitMessage.trim()) return "Enter a commit message";
+    return null;
+  }
+
+  /** Commits the staged changes (or amends HEAD) with the message in the box. */
+  commitChanges(cx) {
+    if (this.busy || !this.root || this.commitBlocker()) return;
+    const root = this.root;
+    const on = this.on;
+    const amend = this.commitAmend;
+    const message = this.commitInput.value().trim();
+    this.busy = true;
+    this.commitError = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("git", [...NON_INTERACTIVE, ...commitArgs(message, amend)], { cwd: root, on });
+        if (r.code !== 0) {
+          this.commitError = (r.stderr || r.stdout).trim().slice(0, 2000) || `git commit failed with code ${r.code}`;
+          notify({ title: amend ? "Amend failed" : "Commit failed", body: this.commitError.slice(0, 300), level: "error" });
+          return;
+        }
+        const head = await exec("git", [...READ, "log", "-1", "--format=%h%x1f%s", "HEAD"], { cwd: root, on });
+        const [shortHash, subject] = head.code === 0 ? head.stdout.trim().split("\x1f") : ["", message.split("\n")[0]];
+        if (this.root === root) {
+          this.resetCommitBox();
+          // A clean tree removes the commit box, and its blur never arrives.
+          this.handle.focus();
+        }
+        notify({
+          title: amend ? "Commit amended" : "Committed",
+          body: shortHash ? `${shortHash} ${subject}` : subject,
+          level: "success",
+        });
+        this.refresh(cx);
+      } catch (err) {
+        this.commitError = err instanceof Error ? err.message : String(err);
+      } finally {
+        this.busy = false;
+        cx.notify();
+      }
+    });
+  }
+
   handleKeyDown(e, cx) {
     if (e.key === "escape") {
       if (this.modalDialog) {
@@ -4130,8 +4403,9 @@ export default class GitGraph extends View {
         cx.notify();
         return;
       }
-      if (this.typing) {
+      if (this.typing || this.commitTyping) {
         this.typing = false;
+        this.commitTyping = false;
         this.handle.focus();
         cx.notify();
         return;
@@ -4155,6 +4429,8 @@ export default class GitGraph extends View {
     }
 
     if (this.modalDialog) return;
+    // Letters and arrows belong to the commit message while it is focused.
+    if (this.commitTyping) return;
 
     if (e.key === "r" && !this.typing) {
       this.refresh(cx, { remoteTags: true, manual: true });
@@ -4908,10 +5184,10 @@ export default class GitGraph extends View {
    * Without the mod it stays visibly disabled and explains what to install in
    * both its tooltip and a click toast.
    */
-  renderOpenFileButton(path, t, cx, revealed) {
+  renderOpenFileButton(path, t, cx, revealed, key = path) {
     const available = this.fileEditorAvailable === true;
     return h_flex()
-      .id(`open-file-${path}`)
+      .id(`open-file-${key}`)
       .flex_none()
       .p(3)
       .rounded(4)
@@ -4931,8 +5207,13 @@ export default class GitGraph extends View {
       .child(svg("mods/git-graph/icons/open-file.svg").size(12));
   }
 
-  /** One VS Code-style folder or file row in the changes tree. */
-  renderTreeRow(row, t, cx) {
+  /**
+   * One VS Code-style folder or file row in the changes tree. `group` keeps
+   * ids, hover and folder collapse apart when a path is listed under both
+   * Staged Changes and Changes.
+   */
+  renderTreeRow(row, t, cx, group = null) {
+    const key = group ? `${group}:${row.path}` : row.path;
     const isFileSelected = !row.isDir && this.selectedFile === row.path;
     const iconPath = row.isDir ? FOLDER_ICON_PATH : fileIconPath(row.name, isLightColor(t.background));
     const status = row.status || "M";
@@ -4944,7 +5225,7 @@ export default class GitGraph extends View {
       : `${row.path}\n${statusLabel(status)} · Binary file (not diffable)`;
 
     return h_flex()
-      .id(`${row.isDir ? "dir" : "file"}-${row.path}`)
+      .id(`${row.isDir ? "dir" : "file"}-${key}`)
       .h(24)
       .flex_none()
       .w_full()
@@ -4957,17 +5238,17 @@ export default class GitGraph extends View {
       .cursor_pointer()
       .on_hover((hovered, cx) => {
         if (hovered) {
-          if (this.hoveredFilePath !== row.path) {
-            this.hoveredFilePath = row.path;
+          if (this.hoveredFilePath !== key) {
+            this.hoveredFilePath = key;
             cx.notify();
           }
-        } else if (this.hoveredFilePath === row.path) {
+        } else if (this.hoveredFilePath === key) {
           this.hoveredFilePath = null;
           cx.notify();
         }
       })
       .on_click((_e, cx) => {
-        if (row.isDir) this.toggleFolder(row.path, cx);
+        if (row.isDir) this.toggleFolder(key, cx);
         else if (diffable) this.openDiffTab(row.path, cx);
         else {
           this.selectedFile = row.path;
@@ -5019,7 +5300,7 @@ export default class GitGraph extends View {
               .child(row.name)
           )
           .when(!row.isDir, (e) =>
-            e.child(this.renderOpenFileButton(row.path, t, cx, this.hoveredFilePath === row.path))
+            e.child(this.renderOpenFileButton(row.path, t, cx, this.hoveredFilePath === key, key))
           )
           // Keep the status letter and line counts right-aligned even though the
           // open-file button now hugs the file name instead of floating right.
@@ -5078,7 +5359,111 @@ export default class GitGraph extends View {
       );
   }
 
+  /**
+   * The working tree's files split like VS Code's Source Control view: a
+   * Staged Changes group (index vs HEAD) above a Changes group (working tree
+   * vs index, plus untracked files). A partly staged file is listed in both,
+   * each with that side's status letter and line counts.
+   */
+  workingTreeGroups() {
+    const staged = [];
+    const changes = [];
+    for (const f of this.workingTreeFiles) {
+      const state = f.state;
+      if (!state) continue;
+      if (state.staged) {
+        staged.push({ ...f, status: state.indexStatus, add: f.stagedAdd, del: f.stagedDel });
+      }
+      if (state.unstaged) {
+        const counts = state.fresh || state.conflict ? {} : { add: f.unstagedAdd, del: f.unstagedDel };
+        changes.push({ ...f, status: state.worktreeStatus, ...counts });
+      }
+    }
+    return [
+      { id: "staged", label: "Staged Changes", files: staged },
+      { id: "changes", label: "Changes", files: changes },
+    ].filter((g) => g.files.length > 0);
+  }
+
+  renderWorkingTreeGroup(group, t, cx) {
+    const prefix = `${group.id}:`;
+    const collapsed = new Set(
+      [...this.collapsedFolders].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length))
+    );
+    const open = !this.collapsedGroups.has(group.id);
+    const rows = open ? flattenFileTree(buildFileTree(group.files), 0, collapsed, []) : [];
+    const count = group.files.length;
+    return v_flex()
+      .id(`tree-group-${group.id}`)
+      .flex_none()
+      .w_full()
+      .child(
+        h_flex()
+          .id(`tree-group-header-${group.id}`)
+          .h(24)
+          .flex_none()
+          .px(8)
+          .gap(6)
+          .items_center()
+          .bg(color(t.raised))
+          .border_b(1)
+          .border_color(color(t.border))
+          .cursor_pointer()
+          .hover((s) => s.bg(color(t.hover)))
+          .tooltip(
+            group.id === "staged"
+              ? `${count} file${count === 1 ? "" : "s"} staged for the next commit\nClick to ${open ? "collapse" : "expand"}`
+              : `${count} file${count === 1 ? "" : "s"} with unstaged changes\nClick to ${open ? "collapse" : "expand"}`
+          )
+          .on_click((_e, cx) => {
+            if (open) this.collapsedGroups.add(group.id);
+            else this.collapsedGroups.delete(group.id);
+            cx.notify();
+          })
+          .child(
+            svg(open ? "mods/git-graph/icons/chevron-down.svg" : "mods/git-graph/icons/chevron-right.svg")
+              .size(10)
+              .flex_none()
+              .text_color(color(t.dim))
+          )
+          .child(div().text_size(11).font_semibold().text_color(color(t.foreground)).child(group.label))
+          .child(div().flex_1())
+          .child(
+            div()
+              .min_w(18)
+              .h(16)
+              .px(5)
+              .rounded_full()
+              .flex()
+              .items_center()
+              .justify_center()
+              .bg(color(group.id === "staged" ? t.ansi2 + "33" : t.border))
+              .text_size(9)
+              .font_medium()
+              .text_color(color(group.id === "staged" ? t.ansi2 : t.muted))
+              .child(String(count))
+          )
+      )
+      .children(rows.map((row) => this.renderTreeRow(row, t, cx, group.id)));
+  }
+
   renderTreeList(t, cx) {
+    if (this.selectedCommit?.isWorkingTree) {
+      return v_flex()
+        .id("tree-file-list")
+        .flex_1()
+        .min_h(0)
+        .w_full()
+        .child(
+          v_flex()
+            .id("tree-file-rows")
+            .flex_1()
+            .min_h(0)
+            .overflow_y_scrollbar()
+            .pb(3)
+            .children(this.workingTreeGroups().map((g) => this.renderWorkingTreeGroup(g, t, cx)))
+        );
+    }
     const tree = buildFileTree(this.commitFiles);
     const rows = flattenFileTree(tree, 0, this.collapsedFolders, []);
     const folderPaths = this.allFolderPaths(tree);
@@ -5361,6 +5746,141 @@ export default class GitGraph extends View {
     return Math.max(32, Math.min(natural, isCompact ? 150 : 200));
   }
 
+  /** Message field, Amend toggle and Commit button above the working-tree files. */
+  renderCommitBox(t, cx) {
+    const blocker = this.commitBlocker();
+    const enabled = !blocker && !this.busy;
+    const amend = this.commitAmend;
+    const pushed = amend && this.headIsPushed();
+    const staged = this.stagedCount;
+    const hint = blocker
+      ? blocker
+      : amend
+        ? staged > 0
+          ? `Adds ${staged} staged file${staged === 1 ? "" : "s"} to HEAD and replaces its message`
+          : "Replaces HEAD's message"
+        : `${staged} staged file${staged === 1 ? "" : "s"}`;
+    return v_flex()
+      .id("commit-box")
+      .flex_none()
+      .p(8)
+      .gap(6)
+      .border_b(1)
+      .border_color(color(t.border))
+      .child(
+        Textarea.new(this.commitInput)
+          .id("commit-message-input")
+          .w_full()
+          .h(64)
+          .px(8)
+          .py(6)
+          .rounded(6)
+          .border_1()
+          .border_color(color(this.commitTyping ? t.accent : t.border))
+          .bg(color(t.background))
+          .text_size(11)
+          .text_color(color(t.foreground))
+      )
+      .when(pushed, (e) =>
+        e.child(
+          div()
+            .id("commit-amend-pushed-warning")
+            .p(6)
+            .rounded(6)
+            .bg(color(t.ansi3 + "18"))
+            .border_1()
+            .border_color(color(t.ansi3 + "44"))
+            .text_size(10.5)
+            .text_color(color(t.ansi3))
+            .whitespace_normal()
+            .child(
+              `⚠️ HEAD is already on ${this.upstream}. Amending rewrites a pushed commit; publishing it afterwards needs a force push.`
+            )
+        )
+      )
+      .when(Boolean(this.commitError), (e) =>
+        e.child(
+          div()
+            .id("commit-error")
+            .max_h(120)
+            .overflow_y_scrollbar()
+            .p(6)
+            .rounded(6)
+            .bg(color(t.ansi1 + "18"))
+            .border_1()
+            .border_color(color(t.ansi1 + "44"))
+            .text_size(10.5)
+            .text_color(color(t.ansi1))
+            .font_family(String(settings().font_family ?? "JetBrains Mono"))
+            .whitespace_normal()
+            .child(this.commitError || "")
+        )
+      )
+      .child(
+        h_flex()
+          .gap(8)
+          .items_center()
+          .child(
+            h_flex()
+              .id("commit-amend-toggle")
+              .flex_none()
+              .gap(5)
+              .items_center()
+              .when(this.hasHead, (e) =>
+                e.cursor_pointer().on_click((_e, cx) => this.toggleCommitAmend(cx))
+              )
+              .when(!this.hasHead, (e) => e.opacity(0.45).cursor_not_allowed())
+              .tooltip(
+                this.hasHead
+                  ? "Amend the last commit: loads its message, and adds any staged changes to it"
+                  : "Nothing to amend before the first commit"
+              )
+              .child(
+                div()
+                  .size(14)
+                  .rounded(3)
+                  .border_1()
+                  .border_color(color(amend ? t.accent : t.border))
+                  .bg(color(amend ? t.accent : t.background))
+                  .flex()
+                  .items_center()
+                  .justify_center()
+                  .when(amend, (box) =>
+                    box.child(svg("mods/git-graph/icons/check.svg").size(10).text_color(color(t.accent_foreground)))
+                  )
+              )
+              .child(div().text_size(11).text_color(color(t.dim)).child("Amend"))
+          )
+          .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(color(t.muted)).child(hint))
+          .child(
+            h_flex()
+              .id("commit-btn")
+              .flex_none()
+              .px(12)
+              .py(4)
+              .gap(5)
+              .items_center()
+              .rounded(6)
+              .bg(color(enabled ? t.solid : t.raised))
+              .border_1()
+              .border_color(color(enabled ? t.solid : t.border))
+              .text_size(11)
+              .font_semibold()
+              .text_color(color(enabled ? t.solid_foreground : t.muted))
+              .when(enabled, (e) => e.cursor_pointer().on_click((_e, cx) => this.commitChanges(cx)))
+              .when(!enabled, (e) => e.cursor_not_allowed())
+              .tooltip(
+                blocker ||
+                  (amend
+                    ? "git commit --amend with this message"
+                    : `git commit: ${staged} staged file${staged === 1 ? "" : "s"}, unstaged changes stay`)
+              )
+              .child(svg("mods/git-graph/icons/commit.svg").size(11))
+              .child(this.busy ? "Working…" : amend ? "Amend" : "Commit")
+          )
+      );
+  }
+
   renderDetailsPanel(t, isCompact, cx) {
     const c = this.selectedCommit;
     if (!c) return null;
@@ -5445,18 +5965,21 @@ export default class GitGraph extends View {
         v_flex()
           .flex_1()
           .min_h(0)
-          .child(
-            div()
-              .flex_none()
-              .h(this.commitMessageHeight(fullMsg, isCompact))
-              .p(8)
-              .overflow_y_scrollbar()
-              .whitespace_normal()
-              .border_b(1)
-              .border_color(color(t.border))
-              .text_size(11)
-              .text_color(color(t.dim))
-              .child(fullMsg)
+          .when(Boolean(c.isWorkingTree), (e) => e.child(this.renderCommitBox(t, cx)))
+          .when(!c.isWorkingTree, (e) =>
+            e.child(
+              div()
+                .flex_none()
+                .h(this.commitMessageHeight(fullMsg, isCompact))
+                .p(8)
+                .overflow_y_scrollbar()
+                .whitespace_normal()
+                .border_b(1)
+                .border_color(color(t.border))
+                .text_size(11)
+                .text_color(color(t.dim))
+                .child(fullMsg)
+            )
           )
           .child(this.renderTreeList(t, cx))
       );
@@ -7384,6 +7907,8 @@ export default class GitGraph extends View {
     if (cMenu.type === "working-tree") {
       const count = this.workingTreeFiles.length;
       const latest = this.stashes[0] || null;
+      const unstagedCount = this.workingTreeFiles.filter((f) => f.state?.unstaged).length;
+      const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
       return div()
         .id("context-menu-backdrop")
         .absolute()
@@ -7420,6 +7945,38 @@ export default class GitGraph extends View {
                     .font_semibold()
                     .child(`Working Tree · ${count} uncommitted file${count === 1 ? "" : "s"}`)
                 )
+            )
+            .child(div().h(1).bg(color(t.border)).my(3))
+            .child(
+              menuItem(
+                "wtmenu-stage-all",
+                "Stage All Changes",
+                "mods/git-graph/icons/plus.svg",
+                (cx) => this.stageAll(cx),
+                unstagedCount > 0 ? `${plural(unstagedCount, "file")} with unstaged changes` : "Everything is staged",
+                unstagedCount === 0
+              )
+            )
+            .child(
+              menuItem(
+                "wtmenu-unstage-all",
+                "Unstage All",
+                "mods/git-graph/icons/minus.svg",
+                (cx) => this.unstageAll(cx),
+                this.stagedCount > 0 ? `${plural(this.stagedCount, "staged file")}` : "Nothing staged",
+                this.stagedCount === 0
+              )
+            )
+            .child(
+              menuItem(
+                "wtmenu-discard-all",
+                "Discard All Changes…",
+                "mods/git-graph/icons/discard.svg",
+                (cx) => this.openModal("discard-all", null, cx),
+                `${plural(count, "file")} · cannot be undone`,
+                count === 0,
+                true
+              )
             )
             .child(div().h(1).bg(color(t.border)).my(3))
             .child(
@@ -7875,6 +8432,9 @@ export default class GitGraph extends View {
       const absolutePath = resolveRepoPath(this.root, normPath);
       const canShowFile = this.fileEditorAvailable === true;
       const diffable = isDiffable(normPath, file.file ?? file);
+      // Commit files have no index state: only working-tree files can be staged or discarded.
+      const state = this.selectedCommit?.isWorkingTree ? file.file?.state : null;
+      const wtFile = state ? { ...file.file, path: normPath } : null;
 
       return div()
         .id("context-menu-backdrop")
@@ -7918,6 +8478,39 @@ export default class GitGraph extends View {
                 )
             )
             .child(div().h(1).bg(color(t.border)).my(3))
+            .when(Boolean(state?.unstaged), (e) =>
+              e.child(
+                menuItem(
+                  "fmenu-stage",
+                  "Stage",
+                  "mods/git-graph/icons/plus.svg",
+                  (cx) => this.stageFile(wtFile, cx),
+                  state?.conflict ? "Marks the conflict as resolved" : null
+                )
+              )
+            )
+            .when(Boolean(state?.staged), (e) =>
+              e.child(
+                menuItem("fmenu-unstage", "Unstage", "mods/git-graph/icons/minus.svg", (cx) =>
+                  this.unstageFile(wtFile, cx)
+                )
+              )
+            )
+            .when(Boolean(state), (e) =>
+              e
+                .child(
+                  menuItem(
+                    "fmenu-discard",
+                    "Discard Changes…",
+                    "mods/git-graph/icons/discard.svg",
+                    (cx) => this.openModal("discard-file", { file: wtFile }, cx),
+                    null,
+                    false,
+                    true
+                  )
+                )
+                .child(div().h(1).bg(color(t.border)).my(3))
+            )
             .child(
               menuItem(
                 "fmenu-show-diff",
@@ -8206,6 +8799,12 @@ export default class GitGraph extends View {
                           ? `Delete Tag '${dialog.tag}'`
                           : dialog.type === "clean-model"
                           ? "AI commit model"
+                          : dialog.type === "discard-file"
+                          ? dialog.deletes
+                            ? `Delete '${dialog.file.path.split("/").pop()}'`
+                            : `Discard Changes to '${dialog.file.path.split("/").pop()}'`
+                          : dialog.type === "discard-all"
+                          ? "Discard All Changes"
                           : dialog.type === "stash"
                           ? dialog.stashStaged
                             ? "Stash Staged Changes"
@@ -8303,6 +8902,14 @@ export default class GitGraph extends View {
                               : `Choose where to delete '${dialog.tag}'`
                       : dialog.type === "clean-model"
                       ? `Currently configured to use ${cleanModelLabel(dialog.activeModel || this.cleanAgentModelLabel())}. Choose a model or click Start agent.`
+                      : dialog.type === "discard-file"
+                      ? dialog.file.state.fresh
+                        ? `'${dialog.file.path}' is untracked. Discarding deletes the file.`
+                        : dialog.deletes
+                          ? `'${dialog.file.path}' is a new file that is not in HEAD. Discarding removes it from the index and deletes the file.`
+                          : `Restore '${dialog.file.path}' to HEAD, dropping its staged and unstaged changes.`
+                      : dialog.type === "discard-all"
+                      ? `Discard the changes in ${dialog.fileCount} file${dialog.fileCount === 1 ? "" : "s"}: staged and unstaged edits to tracked files go back to HEAD.`
                       : dialog.type === "stash"
                       ? dialog.stashStaged
                         ? "Save only the staged changes to a new stash, leaving unstaged edits in place"
@@ -9077,6 +9684,67 @@ export default class GitGraph extends View {
                 )
             )
           )
+          // Discard: optional deletion of untracked files, then the warning.
+          .when(dialog.type === "discard-all" && dialog.newCount > 0, (e) =>
+            e
+              .child(
+                h_flex()
+                  .id("modal-discard-untracked-toggle")
+                  .gap(6)
+                  .items_center()
+                  .cursor_pointer()
+                  .on_click((_e, cx) => {
+                    this.modalDialog.deleteUntracked = !this.modalDialog.deleteUntracked;
+                    this.modalDialog.error = null;
+                    cx.notify();
+                  })
+                  .child(
+                    div()
+                      .size(14)
+                      .rounded(3)
+                      .border_1()
+                      .border_color(color(dialog.deleteUntracked ? t.ansi1 : t.border))
+                      .bg(color(dialog.deleteUntracked ? t.ansi1 : t.background))
+                      .flex()
+                      .items_center()
+                      .justify_center()
+                      .when(dialog.deleteUntracked, (box) =>
+                        box.child(svg("mods/git-graph/icons/check.svg").size(10).text_color(color(t.solid_foreground)))
+                      )
+                  )
+                  .child(
+                    div()
+                      .text_size(11)
+                      .text_color(color(t.dim))
+                      .child(`Also delete ${dialog.newCount} untracked file${dialog.newCount === 1 ? "" : "s"}`)
+                  )
+              )
+              .child(
+                div()
+                  .text_size(10)
+                  .text_color(color(t.muted))
+                  .child(
+                    dialog.deleteUntracked
+                      ? "Runs git clean -fd after restoring: untracked files and folders are deleted; ignored files stay."
+                      : dialog.addedCount
+                        ? `Untracked files are kept. ${dialog.addedCount} newly added file${dialog.addedCount === 1 ? " is" : "s are"} unstaged and kept too.`
+                        : "Untracked files are kept."
+                  )
+              )
+          )
+          .when(dialog.type === "discard-file" || dialog.type === "discard-all", (e) =>
+            e.child(
+              div()
+                .p(8)
+                .rounded(6)
+                .bg(color(t.ansi1 + "18"))
+                .border_1()
+                .border_color(color(t.ansi1 + "44"))
+                .text_size(10.5)
+                .text_color(color(t.ansi1))
+                .child("⚠️ This cannot be undone.")
+            )
+          )
           // Stash inputs: optional message and untracked-files choice.
           .when(dialog.type === "stash", (e) =>
             e
@@ -9254,7 +9922,7 @@ export default class GitGraph extends View {
                   .bg(color(
                     dialog.type === "reset" && dialog.resetMode === "hard"
                       ? t.ansi1
-                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "delete-tag" || dialog.type === "drop-stash" || dialog.type === "force-push"
+                      : dialog.type === "confirm-delete-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "confirm-delete-remote-branch" || dialog.type === "delete-tag" || dialog.type === "drop-stash" || dialog.type === "force-push" || dialog.type === "discard-file" || dialog.type === "discard-all"
                       ? t.ansi1
                       : t.solid
                   ))
@@ -9292,6 +9960,8 @@ export default class GitGraph extends View {
                         ? "Unstashing…"
                         : dialog.type === "drop-stash"
                         ? "Dropping…"
+                        : dialog.type === "discard-file" || dialog.type === "discard-all"
+                        ? "Discarding…"
                         : dialog.type === "rename-branch" || dialog.type === "rename-tag"
                         ? "Renaming…"
                         : dialog.type === "confirm-delete-remote-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "delete-tag"
@@ -9313,6 +9983,14 @@ export default class GitGraph extends View {
                       ? "Unstash"
                       : dialog.type === "drop-stash"
                       ? "Drop Stash"
+                      : dialog.type === "discard-file"
+                      ? dialog.deletes
+                        ? "Delete File"
+                        : "Discard Changes"
+                      : dialog.type === "discard-all"
+                      ? dialog.deleteUntracked
+                        ? "Discard All and Delete"
+                        : "Discard All"
                       : dialog.type === "publish"
                       ? "Create & Push"
                       : dialog.type === "push-tag"

@@ -2835,3 +2835,113 @@ export function resolvePeekTransition(isPeeking, wasPeeking) {
   return null;
 }
 
+/**
+ * Reads one `git status --porcelain=v1` XY code into the index side (X) and
+ * the working-tree side (Y). `inHead` is false when HEAD has no copy of the
+ * path (untracked, staged as new, or a conflict whose "ours" side is absent),
+ * so discarding it deletes the file instead of restoring it.
+ *
+ * @param {string} xy
+ */
+export function workingTreeState(xy) {
+  const x = xy[0] || " ";
+  const y = xy[1] || " ";
+  const fresh = xy === "??";
+  const conflict = xy.includes("U") || xy === "AA" || xy === "DD";
+  const letter = (c) => (c === "D" ? "D" : c === "A" ? "A" : "M");
+  return {
+    fresh,
+    conflict,
+    staged: !fresh && !conflict && x !== " ",
+    unstaged: fresh || conflict || y !== " ",
+    inHead: !(fresh || x === "A" || xy === "DD" || xy === "DU" || xy === "UA"),
+    indexStatus: conflict ? "U" : letter(x),
+    worktreeStatus: conflict ? "U" : fresh ? "A" : letter(y),
+  };
+}
+
+/**
+ * Parses `git diff --numstat -z --no-renames` output into per-path counts.
+ *
+ * @param {string} stdout
+ * @returns {Map<string, { add: number, del: number, binary: boolean }>}
+ */
+export function parseNumstat(stdout) {
+  const stats = new Map();
+  for (const entry of String(stdout || "").split("\0")) {
+    const parts = entry.split("\t");
+    if (parts.length < 3) continue;
+    const [add, del, ...rest] = parts;
+    stats.set(rest.join("\t"), { add: Number(add) || 0, del: Number(del) || 0, binary: add === "-" });
+  }
+  return stats;
+}
+
+// Paths are passed as literal pathspecs, so a file named `*.js` or `:(top)x`
+// touches only itself.
+const LITERAL = "--literal-pathspecs";
+
+/** `git add` for one path (also stages a deletion or marks a conflict resolved). */
+export function stageArgs(path) {
+  return [LITERAL, "add", "--", path];
+}
+
+/** Unstages one path; before the first commit there is no HEAD to restore from. */
+export function unstageArgs(path, hasHead) {
+  return hasHead
+    ? [LITERAL, "restore", "--staged", "--", path]
+    : [LITERAL, "rm", "--cached", "--quiet", "--", path];
+}
+
+/**
+ * Discards every change to one path. Untracked files are cleaned, paths HEAD
+ * does not have are removed from the index and the disk, and everything else
+ * is restored in both the index and the working tree from HEAD.
+ *
+ * @param {string} path
+ * @param {ReturnType<typeof workingTreeState>} state
+ * @returns {{ args: string[], deletes: boolean }}
+ */
+export function discardFileArgs(path, state) {
+  if (state.fresh) return { args: [LITERAL, "clean", "-f", "--", path], deletes: true };
+  if (!state.inHead) return { args: [LITERAL, "rm", "-f", "--quiet", "--", path], deletes: true };
+  return {
+    args: [LITERAL, "restore", "--source=HEAD", "--staged", "--worktree", "--", path],
+    deletes: false,
+  };
+}
+
+/** Stages every change in the working tree, untracked files and deletions included. */
+export function stageAllArgs() {
+  return ["add", "--all"];
+}
+
+/** Unstages everything. Run from the repository root. */
+export function unstageAllArgs(hasHead) {
+  return hasHead ? ["restore", "--staged", "--", "."] : ["rm", "-r", "--cached", "--quiet", "--", "."];
+}
+
+/**
+ * The git commands that discard every change, in order. Unstaging first turns
+ * newly added files into untracked ones, so they are kept unless
+ * `deleteUntracked` asks for `git clean -fd`. Run from the repository root.
+ *
+ * @param {{ hasHead: boolean, hasStaged: boolean, hasTracked: boolean, deleteUntracked: boolean }} options
+ * @returns {string[][]}
+ */
+export function discardAllArgs({ hasHead, hasStaged, hasTracked, deleteUntracked }) {
+  const steps = [];
+  if (hasStaged) steps.push(unstageAllArgs(hasHead));
+  if (hasHead && hasTracked) steps.push(["restore", "--worktree", "--", "."]);
+  if (deleteUntracked) steps.push(["clean", "-f", "-d", "--", "."]);
+  return steps;
+}
+
+/**
+ * `git commit` with the whole message as one argument: no shell, no editor,
+ * and line breaks kept as typed (git still applies its own cleanup).
+ */
+export function commitArgs(message, amend) {
+  return ["commit", ...(amend ? ["--amend"] : []), "-m", message];
+}
+
