@@ -1170,7 +1170,7 @@ test("file icons: every mapped icon ships with the mod", () => {
     assert.ok(has(icon), `missing icon: ${icon}.svg`);
     assert.ok(has(`${icon}_light`), `missing light icon: ${icon}_light.svg`);
   }
-  for (const icon of [FILE_ICON_DEFAULT, "tune", "open-file"]) {
+  for (const icon of [FILE_ICON_DEFAULT, "tune", "open-file", "wrap", "diff-inline", "diff-split", "diff-stacked"]) {
     assert.ok(has(icon), `missing icon: ${icon}.svg`);
   }
   assert.ok(has("folder-base"), "missing folder-base.svg");

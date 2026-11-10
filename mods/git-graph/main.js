@@ -1208,40 +1208,44 @@ export default class GitGraph extends View {
       )
       .child(div().absolute().left("50%").top(0).bottom(0).w(1).bg(color(t.border)));
   }
-  /** One label of the diff layout switcher. */
-  diffViewButton(mode, label, tooltip, t, cx) {
+  /** One icon button of the diff layout switcher. */
+  diffViewButton(mode, iconSvg, tooltip, t, cx) {
     const active = this.diffView === mode;
-    return div()
+    return h_flex()
       .id(`diff-view-${mode}`)
-      .px(7)
-      .py(2)
+      .w(20)
+      .h(20)
+      .flex_none()
+      .items_center()
+      .justify_center()
       .rounded(4)
-      .text_size(10)
       .cursor_pointer()
       .when(active, (e) => e.bg(color(t.selected)).text_color(color(t.foreground)))
       .when(!active, (e) => e.text_color(color(t.dim)))
       .hover((s) => s.bg(color(active ? t.selected : t.hover)))
       .tooltip(tooltip)
       .on_click((_e, cx) => this.setDiffView(mode, cx))
-      .child(label);
+      .child(svg(iconSvg).size(12));
   }
 
   /** The wrap toggle that sits beside the layout switcher. */
   diffWrapButton(t, cx) {
     const active = this.diffWrap;
-    return div()
+    return h_flex()
       .id("diff-wrap")
-      .px(7)
-      .py(2)
+      .flex_none()
+      .w(24)
+      .h(24)
+      .items_center()
+      .justify_center()
       .rounded(4)
-      .text_size(10)
       .cursor_pointer()
       .when(active, (e) => e.bg(color(t.selected)).text_color(color(t.foreground)))
       .when(!active, (e) => e.text_color(color(t.dim)))
       .hover((s) => s.bg(color(active ? t.selected : t.hover)))
-      .tooltip(active ? "Wrap long lines to the pane width" : "Scroll long lines horizontally instead of wrapping")
+      .tooltip(active ? "Wrap long lines to pane width" : "Scroll lines horizontally")
       .on_click((_e, cx) => this.setDiffWrap(!this.diffWrap, cx))
-      .child("Wrap");
+      .child(svg("mods/git-graph/icons/wrap.svg").size(12));
   }
 
   /** Records the view size; wrapping needs the current pane width. */
@@ -1323,24 +1327,61 @@ export default class GitGraph extends View {
             h_flex()
               .flex_none()
               .items_center()
-              .gap(2)
+              .gap(1)
               .p(2)
               .rounded(6)
               .bg(color(t.raised))
-              .child(this.diffViewButton("inline", "Inline", "Old and new lines stacked in one column", t, cx))
-              .child(this.diffViewButton("split", "Split", "Old and new side by side", t, cx))
-              .child(this.diffViewButton("stacked", "Stacked", "Old above new, both panes in sync", t, cx))
-              .child(div().w(1).h(12).mx(2).bg(color(t.border)))
-              .child(this.diffWrapButton(t, cx))
+              .child(this.diffViewButton("inline", "mods/git-graph/icons/diff-inline.svg", "Inline view", t, cx))
+              .child(this.diffViewButton("split", "mods/git-graph/icons/diff-split.svg", "Side-by-side view", t, cx))
+              .child(this.diffViewButton("stacked", "mods/git-graph/icons/diff-stacked.svg", "Stacked view", t, cx))
+          )
+          .child(this.diffWrapButton(t, cx))
+          .child(
+            h_flex()
+              .id("diff-tab-open-file")
+              .flex_none()
+              .w(24)
+              .h(24)
+              .items_center()
+              .justify_center()
+              .rounded(4)
+              .when(this.fileEditorAvailable === true, (btn) =>
+                btn
+                  .cursor_pointer()
+                  .hover((s) => s.bg(color(t.hover)))
+                  .text_color(color(t.dim))
+                  .tooltip("Open in file editor")
+                  .on_click((_e, cx) => this.openFileInEditor(path, cx))
+              )
+              .when(this.fileEditorAvailable !== true, (btn) =>
+                btn
+                  .cursor_not_allowed()
+                  .text_color(color(t.dim))
+                  .opacity(0.5)
+                  .tooltip(FILE_EDITOR_INSTALL_HINT)
+                  .on_click((_e, _cx) => {
+                    notify({
+                      title: "file-editor mod required",
+                      body: FILE_EDITOR_INSTALL_HINT,
+                      level: "warning",
+                    });
+                  })
+              )
+              .child(svg("mods/git-graph/icons/open-file.svg").size(12))
+          )
           .child(
             h_flex()
               .id("diff-tab-copy")
               .flex_none()
-              .p(4)
+              .w(24)
+              .h(24)
+              .items_center()
+              .justify_center()
               .rounded(4)
               .cursor_pointer()
               .hover((s) => s.bg(color(t.hover)))
               .text_color(color(t.muted))
+              .tooltip("Copy diff content")
               .on_click((_e, cx) => {
                 cx.write_to_clipboard(this.diffText ?? "");
                 notify({ title: "Diff copied", body: base, level: "success", timeout: 1500 });
@@ -1351,13 +1392,21 @@ export default class GitGraph extends View {
             h_flex()
               .id("diff-tab-refresh")
               .flex_none()
-              .p(4)
+              .w(24)
+              .h(24)
+              .items_center()
+              .justify_center()
               .rounded(4)
               .cursor_pointer()
               .hover((s) => s.bg(color(t.hover)))
               .text_color(color(t.accent))
+              .tooltip(this.diffLoading ? "Refreshing diff…" : "Refresh diff")
               .on_click((_e, cx) => this.loadDiffTab(cx))
-              .child(svg("mods/git-graph/icons/refresh.svg").size(12))
+              .child(
+                svg("mods/git-graph/icons/refresh.svg")
+                  .size(12)
+                  .when(this.diffLoading, (el) => el.spin(900))
+              )
           )
       )
       .child(
