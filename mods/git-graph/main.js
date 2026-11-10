@@ -239,6 +239,11 @@ function statusLabel(status) {
   return { M: "Modified", A: "Added", D: "Deleted", U: "Conflict", R: "Renamed" }[status] || "Changed";
 }
 
+// The space the repo on screen was found in. A diff tab (any mod pane) has no folder, so while
+// one is focused the graph keeps that repo instead of falling back to the space's own folder,
+// but only in the space it came from.
+let rootSpace = null;
+
 function resolveLocation(manualRoot, currentRoot) {
   if (manualRoot) {
     return { cwd: manualRoot, on: null };
@@ -269,19 +274,24 @@ function resolveLocation(manualRoot, currentRoot) {
   //    already inside the repo on screen.
   const normAlias = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/Documents\/Workspaces(?=\/|$)/, "/workspaces");
   const focusedPane = mine && f?.pane ? panes().find((p) => p.pane === f.pane) : null;
+  if (focusedPane?.mod && currentRoot && rootSpace === space?.id) return { cwd: currentRoot, on };
+  const found = (cwd) => {
+    rootSpace = space?.id ?? null;
+    return { cwd, on };
+  };
   const focusedCwd = focusedPane?.cwd || (mine && f?.terminal ? f?.cwd : null);
   if (focusedCwd) {
     if (currentRoot) {
       if (focusedCwd === currentRoot || focusedCwd.startsWith(currentRoot + "/")) {
-        return { cwd: currentRoot, on };
+        return found(currentRoot);
       }
       const normRoot = normAlias(currentRoot);
       const normCwd = normAlias(focusedCwd);
       if (normRoot && (normCwd === normRoot || normCwd.startsWith(normRoot + "/"))) {
-        return { cwd: currentRoot, on };
+        return found(currentRoot);
       }
     }
-    return { cwd: focusedCwd, on };
+    return found(focusedCwd);
   }
 
   // 2. The terminal in this mod's own tab: the pane it was split beside.
@@ -289,24 +299,24 @@ function resolveLocation(manualRoot, currentRoot) {
   if (activeTabPane?.cwd) {
     if (currentRoot) {
       if (activeTabPane.cwd === currentRoot || activeTabPane.cwd.startsWith(currentRoot + "/")) {
-        return { cwd: currentRoot, on };
+        return found(currentRoot);
       }
       const normRoot = normAlias(currentRoot);
       const normCwd = normAlias(activeTabPane.cwd);
       if (normRoot && (normCwd === normRoot || normCwd.startsWith(normRoot + "/"))) {
-        return { cwd: currentRoot, on };
+        return found(currentRoot);
       }
     }
-    return { cwd: activeTabPane.cwd, on };
+    return found(activeTabPane.cwd);
   }
 
   // 3. The space itself.
-  if (space?.folder) return { cwd: space.folder, on };
+  if (space?.folder) return found(space.folder);
 
   // 4. Any terminal in the space.
   const tabIds = new Set((space?.tabs ?? []).map((t) => t.id));
   const activeSpacePane = panes().find((p) => tabIds.has(p.tab) && p.cwd && !p.mod);
-  if (activeSpacePane?.cwd) return { cwd: activeSpacePane.cwd, on };
+  if (activeSpacePane?.cwd) return found(activeSpacePane.cwd);
 
   // 5. Last resort: a root already resolved for this view.
   if (currentRoot) return { cwd: currentRoot, on };

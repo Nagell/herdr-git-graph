@@ -31,7 +31,7 @@ Inside any Herdr split pane, dedicated tab, or sidebar panel, you see a full vis
 
 ## How it behaves
 
-- Resolves repository location from `props().folder` or auto-detects from the focused terminal pane, active tab, active space, pinned location, or space folder.
+- Resolves repository location from `props().folder` or auto-detects from the focused terminal pane, active tab, active space, pinned location, or space folder. While a diff tab or another mod pane has focus, it keeps the repository it last found in that space instead of falling back to the space folder.
 - Pass `panel: true` when the mod sits in a layout panel (for example Herdr's `changes` slot, so the tab-bar Changes button opens the graph instead of the old changes list). The panel gets the Files-style card, a flexing compact toolbar, and an expand button that opens the same repository in a full-size tab.
 - Selecting a folder with "Open Repository Folder…" overrides the auto-detected location, ensuring clicks inside the git-graph pane never switch or reset the active repository.
 - Live updates when files change via `watchFolder` and periodic 10-second polling.
