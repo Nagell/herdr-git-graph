@@ -95,6 +95,7 @@ import {
   mergedCheckArgs,
   removeWorktreeArgs,
   normalizeCheckoutPath,
+  cloneDestination,
   SPACE_ACTIONS_MOD,
   OPENCODE_INSTALL_CMD,
   OPENCODE_DOCS_URL,
@@ -228,9 +229,9 @@ function statusLabel(status) {
   return { M: "Modified", A: "Added", D: "Deleted", U: "Conflict", R: "Renamed" }[status] || "Changed";
 }
 
-function resolveLocation(manualRoot, currentRoot) {
+function resolveLocation(manualRoot, currentRoot, manualOn = null) {
   if (manualRoot) {
-    return { cwd: manualRoot, on: null };
+    return { cwd: manualRoot, on: manualOn };
   }
   const p = props();
   if (p?.repo || p?.cwd || p?.folder) {
@@ -400,6 +401,9 @@ export default class GitGraph extends View {
     this.pendingRemoteTags = false;
     this.busy = false;
     this.error = null;
+    // True when the resolved folder is not inside a Git worktree, so the
+    // empty state can offer `git init` / `git clone` instead of a plain error.
+    this.noRepository = false;
     this.root = this.diffMode && typeof p.folder === "string" && p.folder ? p.folder : null;
     this.context = null;
     this.watched = null;
@@ -418,6 +422,9 @@ export default class GitGraph extends View {
     this.width = 0;
     this.height = 0;
     this.manualRoot = null;
+    // Machine that owns `manualRoot`. A folder picked locally runs git here,
+    // while a clone keeps the machine the graph resolved.
+    this.manualOn = null;
 
     this.branchDropdownOpen = false;
     this.contextMenu = null; // { type: 'commit' | 'branch' | 'stash' | 'working-tree', commit?, ref?, x: number, y: number }
@@ -1493,7 +1500,7 @@ export default class GitGraph extends View {
   }
 
   getLocation() {
-    return resolveLocation(this.manualRoot, this.root);
+    return resolveLocation(this.manualRoot, this.root, this.manualOn);
   }
 
   getKey() {
@@ -1759,6 +1766,7 @@ export default class GitGraph extends View {
         if (this.getKey() !== context) return;
         if (top.code !== 0) {
           this.root = null;
+          this.noRepository = true;
           this.context = this.getKey();
           this.commits = [];
           this.filteredCommits = [];
@@ -1783,6 +1791,7 @@ export default class GitGraph extends View {
           return;
         }
         const root = top.stdout.trim();
+        this.noRepository = false;
         if (this.root && root !== this.root) {
           // Switched to a DIFFERENT repository!
           this.root = root;
@@ -2350,11 +2359,59 @@ export default class GitGraph extends View {
       const picked = await pickFolder({ prompt: "Select a Git repository" });
       if (picked) {
         this.manualRoot = picked;
+        this.manualOn = null;
         this.context = this.getKey();
         this.root = picked;
         this.refresh(cx);
       }
     });
+  }
+
+  /**
+   * Initialises a repository in the folder the graph resolved to. The folder
+   * is the current context, so the user does not have to pick it again.
+   */
+  initRepository(cx) {
+    const { cwd, on } = this.getLocation();
+    if (!cwd || this.busy) return;
+    this.busy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("git", [...NON_INTERACTIVE, "init"], { cwd, on });
+        if (r.code !== 0) {
+          notify({
+            title: "git init failed",
+            body: (r.stderr || r.stdout).trim() || "Unknown error",
+            level: "error",
+          });
+          return;
+        }
+        this.root = cwd;
+        this.noRepository = false;
+        this.error = null;
+        notify({
+          title: "Repository initialized",
+          body: `Created a Git repository in ${cwd}`,
+          level: "success",
+        });
+        this.refresh(cx, { manual: true });
+      } catch (err) {
+        notify({
+          title: "git init failed",
+          body: err instanceof Error ? err.message : String(err),
+          level: "error",
+        });
+      } finally {
+        this.busy = false;
+        cx.notify();
+      }
+    });
+  }
+
+  /** Opens the URL dialog that clones into the graph's current folder. */
+  openCloneModal(cx) {
+    this.openModal("clone", null, cx);
   }
 
   setBranchFilter(branch, cx) {
@@ -3043,6 +3100,17 @@ export default class GitGraph extends View {
       });
       this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
       this.focusModalInput(cx);
+    } else if (type === "clone") {
+      this.modalDialog = { type, error: null };
+      this.modalInput = InputState.new({ placeholder: "https://github.com/user/repo.git" });
+      this.modalInput.on("change", (_e, cx) => {
+        if (this.modalDialog?.error) {
+          this.modalDialog.error = null;
+        }
+        cx.notify();
+      });
+      this.modalInput.on("submit", (_e, cx) => this.submitModal(cx));
+      this.focusModalInput(cx);
     } else if (type === "stash") {
       this.modalDialog = {
         type,
@@ -3339,6 +3407,30 @@ export default class GitGraph extends View {
       return;
     }
 
+    // Cloning starts outside any repository: the destination comes from the
+    // folder the graph resolved, which is either empty or receives a new
+    // subfolder named after the repository.
+    const cloneLocation = type === "clone" ? this.getLocation() : null;
+    let cloneUrl = null;
+    if (type === "clone") {
+      cloneUrl = this.modalInput?.value().trim() || "";
+      if (!cloneUrl) {
+        dialog.error = "Repository URL cannot be empty";
+        cx.notify();
+        return;
+      }
+      if (cloneUrl.startsWith("-")) {
+        dialog.error = "Repository URL cannot start with '-'";
+        cx.notify();
+        return;
+      }
+      if (!cloneLocation?.cwd) {
+        dialog.error = "No folder is available to clone into";
+        cx.notify();
+        return;
+      }
+    }
+
     this.busy = true;
     cx.notify();
 
@@ -3348,7 +3440,38 @@ export default class GitGraph extends View {
         if (this.modalDialog === dialog) dialog.error = message;
       };
       try {
-        if (type === "branch") {
+        if (type === "clone") {
+          const folder = cloneLocation?.cwd || "";
+          const cloneOn = cloneLocation?.on || null;
+          try {
+            const listing = await exec("ls", ["-A"], { cwd: folder, on: cloneOn });
+            const hasEntries = listing.code === 0 && Boolean(listing.stdout.trim());
+            const destination = cloneDestination(folder, cloneUrl, hasEntries);
+            const r = await exec("git", [...NETWORK, "clone", "--", cloneUrl, destination], {
+              cwd: folder,
+              on: cloneOn,
+              timeout: 600000,
+            });
+            if (r.code !== 0) {
+              fail((r.stderr || r.stdout).trim() || "Failed to clone repository");
+              return;
+            }
+            this.manualRoot = destination;
+            this.manualOn = cloneOn;
+            this.root = destination;
+            this.noRepository = false;
+            this.error = null;
+            this.closeModal(cx);
+            notify({
+              title: "Repository cloned",
+              body: `Cloned into ${destination}`,
+              level: "success",
+            });
+            this.refresh(cx, { manual: true });
+          } catch (err) {
+            fail(err instanceof Error ? err.message : String(err));
+          }
+        } else if (type === "branch") {
           const val = await exec("git", ["check-ref-format", "--branch", name], { cwd: root, on });
           if (val.code !== 0) {
             fail(`'${name}' is not a valid branch name`);
@@ -5159,6 +5282,96 @@ export default class GitGraph extends View {
       );
   }
 
+  /**
+   * Start screen for a folder that is not a Git repository yet: initialise it
+   * in place, or clone a remote repository into it (VS Code's two actions).
+   */
+  renderNoRepositoryState(t, cx) {
+    const folder = this.getLocation().cwd || "";
+    const action = (id, icon, title, subtitle, onPick) =>
+      h_flex()
+        .id(id)
+        .w_full()
+        .gap(10)
+        .items_center()
+        .px(12)
+        .py(9)
+        .rounded(8)
+        .border_1()
+        .border_color(color(t.border))
+        .bg(color(t.background))
+        .cursor_pointer()
+        .hover((s) => s.bg(color(t.hover)).border_color(color(t.accent)))
+        .on_click((_e, cx) => onPick(cx))
+        .child(svg(icon).size(18).flex_none().text_color(color(t.accent)))
+        .child(
+          v_flex()
+            .gap(2)
+            .min_w(0)
+            .child(div().text_size(12).font_semibold().text_color(color(t.foreground)).child(title))
+            .child(div().text_size(10).text_color(color(t.muted)).child(subtitle))
+        );
+
+    return v_flex()
+      .p(24)
+      .gap(12)
+      .items_center()
+      .justify_center()
+      .child(
+        div()
+          .font_semibold()
+          .text_size(14)
+          .text_color(color(t.foreground))
+          .child("No Git repository here")
+      )
+      .when(Boolean(folder), (e) =>
+        e.child(
+          div()
+            .max_w(420)
+            .truncate()
+            .text_size(10.5)
+            .text_color(color(t.muted))
+            .tooltip(folder)
+            .child(folder)
+        )
+      )
+      .child(
+        v_flex()
+          .w(300)
+          .max_w_full()
+          .gap(8)
+          .child(
+            action(
+              "init-repo-btn",
+              "mods/git-graph/icons/branch.svg",
+              "Initialize Repository",
+              "Run git init in this folder",
+              (cx) => this.initRepository(cx)
+            )
+          )
+          .child(
+            action(
+              "clone-repo-btn",
+              "mods/git-graph/icons/fetch.svg",
+              "Clone Repository…",
+              "Clone a remote URL into this folder",
+              (cx) => this.openCloneModal(cx)
+            )
+          )
+      )
+      .when(Boolean(folder), (e) =>
+        e.child(
+          div()
+            .max_w(420)
+            .text_size(9.5)
+            .text_color(color(t.muted))
+            .child(
+              "git init creates a repository here. Cloning asks for a URL and creates a subfolder when this one already has files."
+            )
+        )
+      );
+  }
+
   /** Commit table plus its load-more bar, shared by both detail layouts. */
   renderCommitArea(t, isCompact, cx) {
     const visibleItems = this.getVisibleItems();
@@ -5177,28 +5390,30 @@ export default class GitGraph extends View {
       // Empty or Error states
       .when(Boolean(this.error), (e) =>
         e.child(
-          v_flex()
-            .p(30)
-            .gap(12)
-            .items_center()
-            .justify_center()
-            .child(div().text_size(13).text_color(color(t.dim)).child(this.error || ""))
-            .child(
-              h_flex()
-                .id("open-folder-btn")
-                .gap(6)
+          this.noRepository
+            ? this.renderNoRepositoryState(t, cx)
+            : v_flex()
+                .p(30)
+                .gap(12)
                 .items_center()
-                .px(12)
-                .py(5)
-                .rounded(6)
-                .bg(color(t.solid))
-                .text_color(color(t.solid_foreground))
-                .text_size(12)
-                .cursor_pointer()
-                .on_click((_e, cx) => this.openFolder(cx))
-                .child(svg("mods/git-graph/icons/folder.svg").size(14))
-                .child("Open Repository Folder…")
-            )
+                .justify_center()
+                .child(div().text_size(13).text_color(color(t.dim)).child(this.error || ""))
+                .child(
+                  h_flex()
+                    .id("open-folder-btn")
+                    .gap(6)
+                    .items_center()
+                    .px(12)
+                    .py(5)
+                    .rounded(6)
+                    .bg(color(t.solid))
+                    .text_color(color(t.solid_foreground))
+                    .text_size(12)
+                    .cursor_pointer()
+                    .on_click((_e, cx) => this.openFolder(cx))
+                    .child(svg("mods/git-graph/icons/folder.svg").size(14))
+                    .child("Open Repository Folder…")
+                )
         )
       )
       .when(!this.loading && !this.error && !visibleItems.length, (e) =>
@@ -8152,6 +8367,9 @@ export default class GitGraph extends View {
         : "";
     const tagDeleteRemotes = dialog.type === "delete-tag" ? dialog.availableRemotes || [] : [];
     const tagDeleteErrors = dialog.type === "delete-tag" ? (dialog.remotes || []).filter((r) => r.error) : [];
+    const cloneFolder = dialog.type === "clone" ? this.getLocation().cwd || "" : "";
+    const cloneInput = dialog.type === "clone" ? String(this.modalInput?.value() || "").trim() : "";
+    const clonePreview = cloneFolder && cloneInput ? cloneDestination(cloneFolder, cloneInput, true) : "";
     // A fixed frame keeps the header, hint and buttons on screen while the
     // model list scrolls inside it, even in a short docked panel.
     const modelDialog = dialog.type === "clean-model";
@@ -8216,6 +8434,8 @@ export default class GitGraph extends View {
                           ? `Drop ${dialog.stashRef || "Stash"}`
                           : dialog.type === "publish"
                           ? "Publish to GitHub"
+                          : dialog.type === "clone"
+                          ? "Clone Repository"
                           : dialog.type === "branch"
                           ? `Create Branch at ${commit.shortHash}`
                           : dialog.type === "tag"
@@ -8313,6 +8533,12 @@ export default class GitGraph extends View {
                       ? `Permanently remove "${dialog.stashSubject || dialog.stashRef}" from the stash list`
                       : dialog.type === "publish"
                       ? `Create a new GitHub repository${dialog.account ? ` as @${dialog.account}` : ""} and push '${this.currentBranch}'`
+                      : dialog.type === "clone"
+                      ? cloneFolder
+                        ? `Clones into ${cloneFolder} if it is empty; otherwise into ${
+                            clonePreview || "a subfolder named after the repository"
+                          }`
+                        : "There is no folder to clone into"
                       : dialog.type === "branch"
                       ? `Create a new branch pointing to commit ${commit.shortHash}`
                       : dialog.type === "tag"
@@ -8742,6 +8968,29 @@ export default class GitGraph extends View {
                   )
                 )
             )
+          )
+          // Clone input: remote URL
+          .when(dialog.type === "clone", (e) =>
+            e
+              .child(
+                Input.new(this.modalInput)
+                  .id("modal-clone-input")
+                  .h(32)
+                  .w_full()
+                  .px(8)
+                  .rounded(6)
+                  .border_1()
+                  .border_color(color(t.border))
+                  .bg(color(t.background))
+                  .text_size(12)
+                  .text_color(color(t.foreground))
+              )
+              .child(
+                div()
+                  .text_size(9.5)
+                  .text_color(color(t.muted))
+                  .child("Accepts HTTPS, SSH, or a local repository path. Enter starts the clone.")
+              )
           )
           // Branch inputs: Name + Checkout toggle
           .when(dialog.type === "branch", (e) =>
@@ -9292,6 +9541,8 @@ export default class GitGraph extends View {
                         ? "Unstashing…"
                         : dialog.type === "drop-stash"
                         ? "Dropping…"
+                        : dialog.type === "clone"
+                        ? "Cloning…"
                         : dialog.type === "rename-branch" || dialog.type === "rename-tag"
                         ? "Renaming…"
                         : dialog.type === "confirm-delete-remote-branch" || dialog.type === "confirm-delete-worktree-branch" || dialog.type === "delete-tag"
@@ -9315,6 +9566,8 @@ export default class GitGraph extends View {
                       ? "Drop Stash"
                       : dialog.type === "publish"
                       ? "Create & Push"
+                      : dialog.type === "clone"
+                      ? "Clone Repository"
                       : dialog.type === "push-tag"
                       ? "Publish Tag"
                       : dialog.type === "force-push"
