@@ -69,6 +69,7 @@ import {
   contextMenuPosition,
   isPeekingTerminal,
   resolvePeekTransition,
+  hasWorktreeWatchChange,
 } from "../mods/git-graph/git-logic.js";
 
 test("isLayoutNodeVisible: checks panel hidden state and stack active selections", () => {
@@ -1977,4 +1978,29 @@ test("cloneDestination: empty folders clone in place, dirty ones get a subfolder
   assert.equal(cloneDestination("/", "https://github.com/u/repo.git", true), "/repo");
   assert.equal(cloneDestination("C:\\work", "https://github.com/u/repo.git", true), "C:\\work\\repo");
   assert.equal(cloneDestination("", "https://github.com/u/repo.git", true), "repo");
+});
+
+test("hasWorktreeWatchChange: ignores Git metadata churn from the watcher", () => {
+  const root = "/repo";
+  // Empty or missing batches never refresh.
+  assert.equal(hasWorktreeWatchChange(root, []), false);
+  assert.equal(hasWorktreeWatchChange(root, null), false);
+  // The fsmonitor daemon writes cookie files several times a second; those
+  // must not feed the refresh loop.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git/fsmonitor--daemon/cookies/123-4"]), false);
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git/index"]), false);
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git"]), false);
+  // A batch that means "refresh everything" is the root itself.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo"]), true);
+  // Worktree files still trigger a refresh.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/src/main.js"]), true);
+  assert.equal(hasWorktreeWatchChange("/repo/", ["/repo/src/main.js"]), true);
+  // Mixed batches refresh, and `.gitignore` is not Git metadata.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git/index", "/repo/README.md"]), true);
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.gitignore"]), true);
+  // Nested checkouts keep their own metadata out of the trigger too.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/vendor/lib/.git/HEAD"]), false);
+  // Windows separators normalize the same way.
+  assert.equal(hasWorktreeWatchChange("C:\\repo", ["C:\\repo\\.git\\index"]), false);
+  assert.equal(hasWorktreeWatchChange("C:\\repo", ["C:\\repo\\src\\main.js"]), true);
 });

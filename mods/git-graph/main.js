@@ -102,6 +102,7 @@ import {
   contextMenuPosition,
   isPeekingTerminal,
   resolvePeekTransition,
+  hasWorktreeWatchChange,
 } from "./git-logic.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -810,8 +811,10 @@ export default class GitGraph extends View {
     cx.spawn(async (cx) => {
       try {
         while (this.watched === root) {
-          await watchFolder(root);
-          if (this.watched === root) this.loadDiffTab(cx);
+          const changed = await watchFolder(root);
+          if (this.watched === root && hasWorktreeWatchChange(root, changed)) {
+            this.loadDiffTab(cx);
+          }
         }
       } catch {
         if (this.watched === root) this.watched = null;
@@ -1541,8 +1544,14 @@ export default class GitGraph extends View {
     cx.spawn(async (cx) => {
       try {
         while (this.watchToken === token && this.watched === root) {
-          await watchFolder(root);
-          if (this.watchToken === token && this.watched === root) this.refresh(cx);
+          const changed = await watchFolder(root);
+          if (
+            this.watchToken === token &&
+            this.watched === root &&
+            hasWorktreeWatchChange(root, changed)
+          ) {
+            this.refresh(cx);
+          }
         }
       } catch {
         if (this.watchToken === token) {

@@ -2874,3 +2874,27 @@ export function resolvePeekTransition(isPeeking, wasPeeking) {
   return null;
 }
 
+/**
+ * Whether a watchFolder batch contains worktree content worth refreshing for.
+ *
+ * macOS watches recursively, including Git's own metadata, so the fsmonitor
+ * daemon's cookie files under `.git/fsmonitor--daemon/cookies` arrive as
+ * repository changes several times a second. Refreshing for those would make
+ * every pass feed the next one and leave the toolbar spinner on forever.
+ * Git metadata is never worktree content: the graph refreshes explicitly after
+ * its own mutations, and the 10s poll catches refs changed by other tools.
+ *
+ * @param {string} root Repository root.
+ * @param {string[] | null | undefined} paths Absolute paths from watchFolder.
+ * @returns {boolean}
+ */
+export function hasWorktreeWatchChange(root, paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return false;
+  const base = String(root ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return paths.some((raw) => {
+    if (typeof raw !== "string" || !raw) return false;
+    const path = raw.replace(/\\/g, "/");
+    if (base && path === base) return true;
+    return !path.split("/").includes(".git");
+  });
+}

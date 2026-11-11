@@ -27,6 +27,9 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - The resolved location is checked every 100 ms (in memory only): switching spaces reloads the panel at once instead of waiting for the 10 s refresh.
   - Opening the Changes tab or panel (transitioning from hidden or another panel tab to visible) triggers an immediate automatic refresh so git status is fresh on reveal.
   - `space.folder` is only a fallback, because Herdr sets it when the space is created and never updates it.
+- **Worktree-Only Watch Filtering**:
+  - `watchFolder(root)` is recursive on macOS and reports Git's own metadata too. An active fsmonitor daemon writes cookie files under `.git/fsmonitor--daemon/cookies` several times a second; refreshing for those would feed the next refresh and leave the toolbar spinning forever.
+  - The graph and working-tree diff watchers ignore batches whose paths are all inside a `.git` directory (`hasWorktreeWatchChange` in `git-logic.js`). Explicit refreshes after graph actions and the 10 s poll still pick up ref changes made by other tools.
 - **No-Repository Start Screen**:
   - When `git rev-parse --show-toplevel` fails, the graph shows the resolved folder with two actions instead of only a folder picker: **Initialize Repository** runs `git init` there, and **Clone Repository…** opens a URL modal.
   - Cloning into an empty folder checks out directly there; a folder with files gets a subfolder derived from the URL (`repoNameFromUrl` / `cloneDestination` in `git-logic.js`). The graph then anchors to the clone destination and refreshes.
