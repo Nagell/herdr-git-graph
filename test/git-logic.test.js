@@ -62,6 +62,8 @@ import {
   mergedCheckArgs,
   removeWorktreeArgs,
   normalizeCheckoutPath,
+  repoNameFromUrl,
+  cloneDestination,
   SPACE_ACTIONS_MOD,
   parseTreeAgentSession,
   contextMenuPosition,
@@ -76,6 +78,7 @@ import {
   unstageAllArgs,
   discardAllArgs,
   commitArgs,
+  hasWorktreeWatchChange,
 } from "../mods/git-graph/git-logic.js";
 
 test("workingTreeState: splits index and working-tree sides", () => {
@@ -2044,4 +2047,50 @@ test("resolvePeekTransition: detects opened and closed state transitions", () =>
   assert.equal(resolvePeekTransition(false, true), "closed");
   // Staying closed
   assert.equal(resolvePeekTransition(false, false), null);
+});
+
+test("repoNameFromUrl: derives a folder name from every clone URL shape", () => {
+  assert.equal(repoNameFromUrl("https://github.com/user/repo.git"), "repo");
+  assert.equal(repoNameFromUrl("https://github.com/user/repo"), "repo");
+  assert.equal(repoNameFromUrl("https://github.com/user/repo/"), "repo");
+  assert.equal(repoNameFromUrl("git@github.com:user/repo.git"), "repo");
+  assert.equal(repoNameFromUrl("ssh://git@host:2222/user/repo.git"), "repo");
+  assert.equal(repoNameFromUrl("file:///tmp/project"), "project");
+  assert.equal(repoNameFromUrl("/tmp/my project"), "my-project");
+  assert.equal(repoNameFromUrl("../../"), "repository");
+  assert.equal(repoNameFromUrl(""), "repository");
+});
+
+test("cloneDestination: empty folders clone in place, dirty ones get a subfolder", () => {
+  assert.equal(cloneDestination("/tmp/project", "https://github.com/u/repo.git", false), "/tmp/project");
+  assert.equal(cloneDestination("/tmp/project/", "https://github.com/u/repo.git", false), "/tmp/project");
+  assert.equal(cloneDestination("/tmp/project", "https://github.com/u/repo.git", true), "/tmp/project/repo");
+  assert.equal(cloneDestination("/", "https://github.com/u/repo.git", true), "/repo");
+  assert.equal(cloneDestination("C:\\work", "https://github.com/u/repo.git", true), "C:\\work\\repo");
+  assert.equal(cloneDestination("", "https://github.com/u/repo.git", true), "repo");
+});
+
+test("hasWorktreeWatchChange: ignores Git metadata churn from the watcher", () => {
+  const root = "/repo";
+  // Empty or missing batches never refresh.
+  assert.equal(hasWorktreeWatchChange(root, []), false);
+  assert.equal(hasWorktreeWatchChange(root, null), false);
+  // The fsmonitor daemon writes cookie files several times a second; those
+  // must not feed the refresh loop.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git/fsmonitor--daemon/cookies/123-4"]), false);
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git/index"]), false);
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git"]), false);
+  // A batch that means "refresh everything" is the root itself.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo"]), true);
+  // Worktree files still trigger a refresh.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/src/main.js"]), true);
+  assert.equal(hasWorktreeWatchChange("/repo/", ["/repo/src/main.js"]), true);
+  // Mixed batches refresh, and `.gitignore` is not Git metadata.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.git/index", "/repo/README.md"]), true);
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/.gitignore"]), true);
+  // Nested checkouts keep their own metadata out of the trigger too.
+  assert.equal(hasWorktreeWatchChange(root, ["/repo/vendor/lib/.git/HEAD"]), false);
+  // Windows separators normalize the same way.
+  assert.equal(hasWorktreeWatchChange("C:\\repo", ["C:\\repo\\.git\\index"]), false);
+  assert.equal(hasWorktreeWatchChange("C:\\repo", ["C:\\repo\\src\\main.js"]), true);
 });

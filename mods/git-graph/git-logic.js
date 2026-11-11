@@ -1349,6 +1349,45 @@ export function normalizeCheckoutPath(path) {
 }
 
 /**
+ * Derives a folder name from a clone URL or path. Trailing slashes and a
+ * `.git` suffix are dropped, then the last path segment is sanitised so it is
+ * safe to use as a directory name.
+ *
+ * @param {string | null | undefined} url
+ * @returns {string}
+ */
+export function repoNameFromUrl(url) {
+  const trimmed = String(url ?? "")
+    .trim()
+    .replace(/[\\/]+$/, "")
+    .replace(/\.git$/i, "");
+  const parts = trimmed.split(/[\\/:]/).filter((part) => part && part !== "." && part !== "..");
+  const last = parts[parts.length - 1] || "";
+  const safe = last.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "");
+  return safe || "repository";
+}
+
+/**
+ * Picks where `git clone` should land. An empty folder receives the checkout
+ * directly; a folder that already has entries gets a subfolder named after the
+ * repository, so an existing project is never overwritten.
+ *
+ * @param {string | null | undefined} folder
+ * @param {string | null | undefined} url
+ * @param {boolean} folderHasEntries
+ * @returns {string}
+ */
+export function cloneDestination(folder, url, folderHasEntries) {
+  const raw = String(folder ?? "").trim();
+  const base = /^[A-Za-z]:[\\/]$/.test(raw) || raw === "/" ? raw : raw.replace(/[\\/]+$/, "");
+  if (!base) return repoNameFromUrl(url);
+  if (!folderHasEntries) return base;
+  const separator = base.includes("\\") && !base.includes("/") ? "\\" : "/";
+  const needsSeparator = !/[\\/]$/.test(base);
+  return `${base}${needsSeparator ? separator : ""}${repoNameFromUrl(url)}`;
+}
+
+/**
  * Parses `git worktree list --porcelain`. Records are separated by blank lines
  * and each starts with a `worktree <path>` line. Bare and prunable records are
  * skipped, but the first record is always the main checkout, so a linked
@@ -2945,3 +2984,27 @@ export function commitArgs(message, amend) {
   return ["commit", ...(amend ? ["--amend"] : []), "-m", message];
 }
 
+/**
+ * Whether a watchFolder batch contains worktree content worth refreshing for.
+ *
+ * macOS watches recursively, including Git's own metadata, so the fsmonitor
+ * daemon's cookie files under `.git/fsmonitor--daemon/cookies` arrive as
+ * repository changes several times a second. Refreshing for those would make
+ * every pass feed the next one and leave the toolbar spinner on forever.
+ * Git metadata is never worktree content: the graph refreshes explicitly after
+ * its own mutations, and the 10s poll catches refs changed by other tools.
+ *
+ * @param {string} root Repository root.
+ * @param {string[] | null | undefined} paths Absolute paths from watchFolder.
+ * @returns {boolean}
+ */
+export function hasWorktreeWatchChange(root, paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return false;
+  const base = String(root ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return paths.some((raw) => {
+    if (typeof raw !== "string" || !raw) return false;
+    const path = raw.replace(/\\/g, "/");
+    if (base && path === base) return true;
+    return !path.split("/").includes(".git");
+  });
+}

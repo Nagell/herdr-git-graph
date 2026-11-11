@@ -20,13 +20,20 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - Never use an event handler's `cx` after an `await`: that `Context` is valid only for the host call that delivered the event, and using it later throws (leaving `busy` flags stuck). Do the synchronous reads first, then wrap every awaited operation in `cx.spawn(async (cx) => …)` and use the `AsyncContext` it provides.
 - **Stable Location Resolution**:
   - Uses `props().folder || props().repo || props().cwd` when provided.
-  - Retains user-selected repositories via `this.manualRoot` from `pickFolder()` so clicking into the graph never resets the repository view.
+  - Retains user-selected repositories via `this.manualRoot` from `pickFolder()` or a successful clone, so clicking into the graph never resets the repository view. `this.manualOn` keeps the machine for a cloned remote folder; the local picker clears it.
   - A **pinned space is anchored to its pinned location** (`spaces.pinned_locations`): terminals inside the space may `cd` anywhere, but the graph stays on the pinned project.
   - Unpinned spaces follow: the focused terminal's cwd, the terminal in this mod's own tab (the split partner), the space's folder, any terminal in the space, then the root already resolved.
   - A focus left behind in the previous space (when the selected space has no pane) is ignored, so the panel never reads another space's folder.
   - The resolved location is checked every 100 ms (in memory only): switching spaces reloads the panel at once instead of waiting for the 10 s refresh.
   - Opening the Changes tab or panel (transitioning from hidden or another panel tab to visible) triggers an immediate automatic refresh so git status is fresh on reveal.
   - `space.folder` is only a fallback, because Herdr sets it when the space is created and never updates it.
+- **Worktree-Only Watch Filtering**:
+  - `watchFolder(root)` is recursive on macOS and reports Git's own metadata too. An active fsmonitor daemon writes cookie files under `.git/fsmonitor--daemon/cookies` several times a second; refreshing for those would feed the next refresh and leave the toolbar spinning forever.
+  - The graph and working-tree diff watchers ignore batches whose paths are all inside a `.git` directory (`hasWorktreeWatchChange` in `git-logic.js`). Explicit refreshes after graph actions and the 10 s poll still pick up ref changes made by other tools.
+- **No-Repository Start Screen**:
+  - When `git rev-parse --show-toplevel` fails, the graph shows the resolved folder with two actions instead of only a folder picker: **Initialize Repository** runs `git init` there, and **Clone Repository…** opens a URL modal.
+  - Cloning into an empty folder checks out directly there; a folder with files gets a subfolder derived from the URL (`repoNameFromUrl` / `cloneDestination` in `git-logic.js`). The graph then anchors to the clone destination and refreshes.
+  - Clone failures stay in the modal with git's message, use `NETWORK` flags to avoid credential hangs, and allow up to 10 minutes. Other error states keep the **Open Repository Folder…** fallback.
 - **Safe Git Log Parsing & Unborn Branch Handling**:
   - Detects unborn branches via `git branch --show-current` with fallback to `HEAD`.
   - Checks `git rev-parse --verify HEAD` before attempting log extraction, providing a friendly empty state for fresh repositories without crashing.
