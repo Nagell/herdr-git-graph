@@ -1574,6 +1574,18 @@ export function highlightRows(rows, path) {
   });
 }
 
+/**
+ * The details pane's share of the commit list + details split, kept between 5% and
+ * 95% so neither pane disappears; anything that isn't a number gives half.
+ *
+ * @param {number} share
+ * @returns {number}
+ */
+export function clampDetailsShare(share) {
+  if (typeof share !== "number" || !Number.isFinite(share)) return 0.5;
+  return Math.min(0.95, Math.max(0.05, share));
+}
+
 // --- Side-by-side layouts and intra-line change highlighting -------------
 //
 // A unified diff only says that a line was replaced; it does not say which

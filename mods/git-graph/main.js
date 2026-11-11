@@ -114,8 +114,24 @@ import {
   discardAllArgs,
   commitArgs,
   hasWorktreeWatchChange,
+  clampDetailsShare,
 } from "./git-logic.js";
 import { syntaxColors } from "./syntax.js";
+
+// The details pane and the commit list above it can each be dragged down to this
+// height, so either one can take nearly the whole split.
+const SPLIT_PANE_MIN = 40;
+const DETAILS_SHARE_KEY = "detailsShare";
+
+/** The details pane's share of the split from the mod's localStorage; half when unset. */
+function readDetailsShare() {
+  try {
+    const saved = localStorage.getItem(DETAILS_SHARE_KEY);
+    return clampDetailsShare(saved == null ? 0.5 : Number(saved));
+  } catch {
+    return 0.5;
+  }
+}
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const NON_INTERACTIVE = ["-c", "core.editor=true", "-c", "core.pager=cat"];
@@ -445,6 +461,11 @@ export default class GitGraph extends View {
     this.rootBounds = null;
     this.width = 0;
     this.height = 0;
+    // Height of the commit list + details split, measured, and the details pane's share
+    // of it: half to start, then whatever the last drag left, kept in the mod's own
+    // localStorage so it outlives a restart.
+    this.splitHeight = 0;
+    this.detailsShare = readDetailsShare();
     this.manualRoot = null;
     // Machine that owns `manualRoot`. A folder picked locally runs git here,
     // while a clone keeps the machine the graph resolved.
@@ -1296,6 +1317,26 @@ export default class GitGraph extends View {
       this.height = h;
       cx.notify();
     }
+  }
+
+  /** Records the commit list + details split's height, for the details pane's opening size. */
+  updateSplitHeight(size, cx) {
+    const zoom = Number(settings()?.zoom) || 1;
+    const h = size && typeof size.height === "number" ? Math.round(size.height / zoom) : 0;
+    if (h !== this.splitHeight) {
+      this.splitHeight = h;
+      cx.notify();
+    }
+  }
+
+  /** Keeps the details pane's share of the split after a drag (sizes: list, details). */
+  saveDetailsShare(sizes) {
+    const total = (sizes?.[0] ?? 0) + (sizes?.[1] ?? 0);
+    if (!(total > 0)) return;
+    this.detailsShare = clampDetailsShare(sizes[1] / total);
+    try {
+      localStorage.setItem(DETAILS_SHARE_KEY, String(this.detailsShare));
+    } catch {}
   }
 
   /** Tracks the window-relative origin and bounds of the mod view. */
@@ -10676,22 +10717,36 @@ export default class GitGraph extends View {
           .when(!isCompact, (e) => e.child(div().w(70).flex_none().text_center().child("Commit")))
       )
       // Commit list + resizable details pane. The native group owns the drag
-      // handle, so the bottom pane keeps its size across repaints.
-      .when(Boolean(this.selectedCommit), (e) =>
-        e.child(
-          v_resizable("git-graph-split")
-            .flex_1()
-            .min_h(0)
-            .child(resizable_panel().child(this.renderCommitArea(t, isCompact, cx)))
-            .child(
-              resizable_panel()
-                .size(isCompact ? 340 : 300)
-                .size_range(140, 700)
-                .child(this.renderDetailsPanel(t, isCompact, cx))
+      // handle, so the bottom pane keeps its size across repaints. The box around
+      // it is always there, so its height is known before a commit is selected:
+      // the pane opens at its share of that height (see `detailsShare`).
+      .child(
+        v_flex()
+          .id("git-graph-split-box")
+          .flex_1()
+          .min_h(0)
+          .on_size_change((size, cx) => this.updateSplitHeight(size, cx))
+          .when(Boolean(this.selectedCommit) && this.splitHeight > 0, (e) =>
+            e.child(
+              v_resizable("git-graph-split")
+                .flex_1()
+                .min_h(0)
+                .on_resize((sizes) => this.saveDetailsShare(sizes))
+                .child(
+                  resizable_panel()
+                    .size_range(SPLIT_PANE_MIN)
+                    .child(this.renderCommitArea(t, isCompact, cx))
+                )
+                .child(
+                  resizable_panel()
+                    .size(Math.round(this.splitHeight * this.detailsShare))
+                    .size_range(SPLIT_PANE_MIN)
+                    .child(this.renderDetailsPanel(t, isCompact, cx))
+                )
             )
-        )
+          )
+          .when(!this.selectedCommit || this.splitHeight === 0, (e) => e.child(this.renderCommitArea(t, isCompact, cx)))
       )
-      .when(!this.selectedCommit, (e) => e.child(this.renderCommitArea(t, isCompact, cx)))
       // Overlays painted last in painter's algorithm order (no invalid z_index)
       .when(this.branchDropdownOpen, (e) => e.child(this.renderBranchDropdown(t, cx)))
       .when(Boolean(this.contextMenu), (e) => e.child(this.renderContextMenu(t, cx)))

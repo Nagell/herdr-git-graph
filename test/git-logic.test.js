@@ -80,6 +80,7 @@ import {
   commitArgs,
   hasWorktreeWatchChange,
   highlightRows,
+  clampDetailsShare,
 } from "../mods/git-graph/git-logic.js";
 
 test("workingTreeState: splits index and working-tree sides", () => {
@@ -2116,4 +2117,12 @@ test("highlightRows colours diff lines with syntax.js and keeps each side's stat
   // Markup is coloured too, and plain text is "plain", never null.
   assert.deepEqual(rows[4].spans[0], { text: "<div", kind: "tag" });
   assert.ok(rows.every((row) => (row.spans ?? []).every((s) => typeof s.kind === "string")));
+});
+
+test("clampDetailsShare keeps the details pane between 5% and 95%", () => {
+  assert.equal(clampDetailsShare(0.3), 0.3);
+  assert.equal(clampDetailsShare(0), 0.05);
+  assert.equal(clampDetailsShare(1), 0.95);
+  assert.equal(clampDetailsShare(Number.NaN), 0.5);
+  assert.equal(clampDetailsShare(/** @type {any} */ ("0.3")), 0.5);
 });

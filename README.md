@@ -73,7 +73,7 @@ Instead of switching away to an external Git GUI or browser tool, `git-graph` re
   - Right-clicking a file row opens its context menu: **Show Diff**, **Show File**, and **Copy File Path** (working-tree files also get Stage / Unstage / Discard Changes…). **Show Diff** is disabled for binary non-diffable files; Show File is disabled with the install hint when `file-editor` is missing; Copy File Path copies the absolute path.
   - Porcelain status letters on the right: Added (green/`ansi2`), Deleted (red/`ansi1`), Modified (blue/`ansi4`), Conflict (yellow/`ansi3`).
   - Colored per-file `+added` / `−deleted` counts beside the status letter (green/red); untracked diffable text files also show `+N` by counting their lines. The hover tooltip keeps the full path and status label.
-  - The details pane below the graph is resizable: drag the divider to change how much of the panel belongs to the commit list and how much to the changed-file tree.
+  - The details pane below the graph opens at half the height and is resizable: drag the divider anywhere between the top and the bottom. Its share of the height is remembered, also after a restart.
   - Diffs use the same syntax colours as Better Files and Better Changes ([herdr-mods](https://github.com/munza/herdr-mods)): keywords, strings, numbers, constants, functions, types, markup tags and attributes, and JSON/YAML keys.
   - The commit message wraps and expands with its content up to a readable cap, then scrolls, so the description is never clipped. With the working tree selected, the commit box takes its place.
 - **Full-Size Diff Tabs**:
