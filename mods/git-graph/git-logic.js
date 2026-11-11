@@ -1,7 +1,7 @@
 // Pure logic functions for Git Graph: ref parsing, topological DAG lane calculation,
 // file tree construction, and diff line formatting.
 
-import { languageOf, tokenizeLine } from "./syntax.js";
+import { WHOLE_FILE_LINES, languageOf, tokenizeLine } from "./syntax.js";
 
 /**
  * Resolves the effective repository root given the currently loaded root and a candidate cwd.
@@ -1559,19 +1559,28 @@ export function highlightRows(rows, path) {
   let newState = null;
   // syntax.js marks plain text with kind null; the diff renderer calls it "plain".
   const spansOf = (runs) => runs.map((run) => ({ text: run.text, kind: run.kind ?? "plain" }));
+  // A huge diff, or one the lexer fails on, keeps its text uncoloured. A row needs spans
+  // either way: lineSegments draws a row without them as a blank line.
+  const plain = () =>
+    rows.map((row) => (row.kind === "@" || row.kind === "\\" ? row : { ...row, spans: [{ text: row.text, kind: "plain" }] }));
+  if (rows.length > WHOLE_FILE_LINES) return plain();
 
-  return rows.map((row) => {
-    if (row.kind === "@" || row.kind === "\\") return row;
-    if (row.kind === "-") {
-      const result = tokenizeLine(row.text, language, oldState);
-      oldState = result.state;
+  try {
+    return rows.map((row) => {
+      if (row.kind === "@" || row.kind === "\\") return row;
+      if (row.kind === "-") {
+        const result = tokenizeLine(row.text, language, oldState);
+        oldState = result.state;
+        return { ...row, spans: spansOf(result.runs) };
+      }
+      const result = tokenizeLine(row.text, language, newState);
+      newState = result.state;
+      if (row.kind === " ") oldState = newState;
       return { ...row, spans: spansOf(result.runs) };
-    }
-    const result = tokenizeLine(row.text, language, newState);
-    newState = result.state;
-    if (row.kind === " ") oldState = newState;
-    return { ...row, spans: spansOf(result.runs) };
-  });
+    });
+  } catch {
+    return plain();
+  }
 }
 
 /**

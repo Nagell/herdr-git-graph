@@ -2126,3 +2126,20 @@ test("clampDetailsShare keeps the details pane between 5% and 95%", () => {
   assert.equal(clampDetailsShare(Number.NaN), 0.5);
   assert.equal(clampDetailsShare(/** @type {any} */ ("0.3")), 0.5);
 });
+
+test("highlightRows reads env files as env and keeps a huge diff's text plain", () => {
+  const env = "." + "env";
+  const rows = highlightRows(
+    [
+      { kind: "+", text: "### needed only for local development" },
+      { kind: "+", text: "APP_URL=http://localhost:3000" },
+    ],
+    `app/${env}.test`,
+  );
+  assert.deepEqual(rows[0].spans, [{ text: "### needed only for local development", kind: "comment" }]);
+  assert.deepEqual(rows[1].spans.find((s) => s.kind === "property"), { text: "APP_URL", kind: "property" });
+
+  const big = Array.from({ length: 5001 }, (_, i) => ({ kind: "+", text: `const a${i} = ${i};` }));
+  const plain = highlightRows(big, "src/big.ts");
+  assert.deepEqual(plain[7].spans, [{ text: "const a7 = 7;", kind: "plain" }], "each row keeps its own text");
+});
