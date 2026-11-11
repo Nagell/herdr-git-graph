@@ -1,51 +1,103 @@
 // syntax.js: code as coloured runs, for views that draw their own rows. Herdr's highlighter
 // only reaches its Editor, which can't draw a diff or mark a line, so this is a small lexer:
 // no grammar, but block comments, template strings and open tags carry from line to line.
-// Shared byte for byte between Better Files and Better Changes.
+// Shared byte for byte between Better Files, Better Changes and Git Graph.
+
+// Each language's own keywords: a word is a keyword only in the languages that have it, so
+// `local` stays plain in TypeScript and `for` stays plain in an env file's comment.
+const words = (list) => new Set(list.split(" "));
+const JS_KEYWORDS = words(
+  "abstract as async await break case catch class const continue debugger declare default delete do else " +
+    "enum export extends finally for from function get if implements import in infer instanceof interface is " +
+    "keyof let namespace new of override package private protected public readonly return satisfies set " +
+    "static super switch this throw try type typeof unique using var void while with yield",
+);
+const GO_KEYWORDS = words(
+  "break case chan const continue default defer else fallthrough for func go goto if import interface map " +
+    "package range return select struct switch type var",
+);
+const RS_KEYWORDS = words(
+  "as async await break const continue crate dyn else enum extern fn for if impl in let loop match mod move " +
+    "mut pub ref return self Self static struct super trait type unsafe use where while",
+);
+const PY_KEYWORDS = words(
+  "and as assert async await break case class continue def del elif else except finally for from global if " +
+    "import in is lambda match nonlocal not or pass raise return self try while with yield",
+);
+const RB_KEYWORDS = words(
+  "alias and begin break case class def do else elsif end ensure for if in module next not or redo " +
+    "require rescue retry return self super then undef unless until when while yield",
+);
+const SH_KEYWORDS = words(
+  "alias break case continue declare do done elif else esac exit export fi for function if in local " +
+    "readonly return select set shift source then time typeset unset until while",
+);
+const LUA_KEYWORDS = words("and break do else elseif end for function goto if in local not or repeat return then until while");
+const HS_KEYWORDS = words("case class data deriving do else if import in infix instance let module newtype of then type where");
+// C, C++, Java, Kotlin, Swift, C#, PHP, Dart and Scala share most of theirs.
+const C_KEYWORDS = words(
+  "abstract async auto await break case catch char class const continue data default defer delete do double " +
+    "else enum extends extension extern final float for friend fun func goto guard if implements import inline " +
+    "int interface internal is let long namespace new object open operator override package private protected " +
+    "protocol public record register return sealed short signed sizeof static struct super switch template " +
+    "this throw throws try typedef typename union unsigned using val var virtual void volatile when where while yield",
+);
+const DOCKER_KEYWORDS = words(
+  "ADD ARG AS CMD COPY ENTRYPOINT ENV EXPOSE FROM HEALTHCHECK LABEL ONBUILD RUN SHELL STOPSIGNAL USER VOLUME WORKDIR",
+);
+const MAKE_KEYWORDS = words("define else endef endif export ifdef ifeq ifndef ifneq include override");
+const NONE = new Set();
 
 const C_LIKE = { line: "//", block: ["/*", "*/"] };
 const HASH = { line: "#" };
 const SPECS = {
-  js: { ...C_LIKE, template: true },
-  ts: { ...C_LIKE, template: true },
-  jsx: { ...C_LIKE, template: true, markup: true },
-  tsx: { ...C_LIKE, template: true, markup: true },
-  vue: { ...C_LIKE, template: true, markup: true, markupComment: true },
-  svelte: { ...C_LIKE, template: true, markup: true, markupComment: true },
-  astro: { ...C_LIKE, template: true, markup: true, markupComment: true },
-  html: { markup: true, markupComment: true },
-  xml: { markup: true, markupComment: true },
-  css: { block: ["/*", "*/"], keys: true },
-  go: { ...C_LIKE, template: true },
-  rs: { ...C_LIKE, charQuotes: true },
-  py: { ...HASH, triple: true },
+  js: { ...C_LIKE, template: true, keywords: JS_KEYWORDS },
+  ts: { ...C_LIKE, template: true, keywords: JS_KEYWORDS },
+  jsx: { ...C_LIKE, template: true, markup: true, keywords: JS_KEYWORDS },
+  tsx: { ...C_LIKE, template: true, markup: true, keywords: JS_KEYWORDS },
+  vue: { ...C_LIKE, template: true, markup: true, markupComment: true, keywords: JS_KEYWORDS },
+  svelte: { ...C_LIKE, template: true, markup: true, markupComment: true, keywords: JS_KEYWORDS },
+  astro: { ...C_LIKE, template: true, markup: true, markupComment: true, keywords: JS_KEYWORDS },
+  html: { markup: true, markupComment: true, keywords: NONE },
+  xml: { markup: true, markupComment: true, keywords: NONE },
+  css: { block: ["/*", "*/"], keys: true, keywords: NONE },
+  go: { ...C_LIKE, template: true, keywords: GO_KEYWORDS },
+  rs: { ...C_LIKE, charQuotes: true, keywords: RS_KEYWORDS },
+  c: { ...C_LIKE, charQuotes: true, keywords: C_KEYWORDS },
+  py: { ...HASH, triple: true, keywords: PY_KEYWORDS },
+  rb: { ...HASH, keywords: RB_KEYWORDS },
+  sh: { ...HASH, keywords: SH_KEYWORDS },
+  hash: { ...HASH, keywords: NONE },
+  dockerfile: { ...HASH, keywords: DOCKER_KEYWORDS },
+  makefile: { ...HASH, keywords: MAKE_KEYWORDS },
   sql: { line: "--", block: ["/*", "*/"], anyCase: true },
-  lua: { line: "--" },
-  hs: { line: "--" },
+  lua: { line: "--", keywords: LUA_KEYWORDS },
+  hs: { line: "--", keywords: HS_KEYWORDS },
   json: { keys: true, data: true },
-  jsonc: { ...C_LIKE, keys: true },
+  jsonc: { ...C_LIKE, keys: true, keywords: NONE },
   yaml: { ...HASH, keys: true, data: true },
   toml: { ...HASH, keys: true, data: true },
+  // An env file: `# notes`, `KEY=value` (or `export KEY=value`), values left as written.
+  env: { ...HASH, envKeys: true, data: true },
   md: { markdown: true },
   txt: { plain: true },
 };
 const ALIASES = {
   mjs: "js", cjs: "js", mts: "ts", cts: "ts", htm: "html", svg: "xml", plist: "xml",
   scss: "jsonc", less: "jsonc", yml: "yaml", markdown: "md", log: "txt", csv: "txt",
-  rb: "py", sh: "py", bash: "py", zsh: "py", fish: "py", nix: "py", r: "py", pl: "py",
-  ex: "py", exs: "py", tf: "py", conf: "py", ini: "toml", env: "py", dockerfile: "py",
-  makefile: "py", mk: "py", gitignore: "py", elm: "hs",
+  h: "c", cc: "c", cpp: "c", cxx: "c", hh: "c", hpp: "c", hxx: "c", m: "c", mm: "c", java: "c",
+  kt: "c", kts: "c", swift: "c", cs: "c", php: "c", dart: "c", scala: "c", groovy: "c", gradle: "c",
+  bash: "sh", zsh: "sh", fish: "sh", bashrc: "sh", zshrc: "sh", zshenv: "sh", zprofile: "sh", profile: "sh",
+  nix: "hash", r: "hash", pl: "hash", ex: "hash", exs: "hash", tf: "hash", conf: "hash", gitignore: "hash",
+  dockerignore: "hash", ini: "toml", editorconfig: "toml", npmrc: "toml", mk: "makefile", elm: "hs",
 };
-const SPECIAL_NAMES = { Dockerfile: "dockerfile", Makefile: "makefile", Justfile: "makefile" };
+const SPECIAL_NAMES = { Dockerfile: "dockerfile", Makefile: "makefile", Justfile: "makefile", Gemfile: "rb", Rakefile: "rb" };
 
-const KEYWORDS = new Set(
-  ("abstract and as async await begin break case catch class const continue debugger declare def default defer del " +
-    "delete do done elif else elsif end ensure enum esac except export extends fi finally fn for from func function " +
-    "go if impl implements import in instanceof interface is keyof lambda let local loop match mod module mut " +
-    "namespace new not of or override package pass private protected pub public raise readonly require rescue " +
-    "return satisfies self static struct super switch then this throw trait try type typeof unless until use var " +
-    "void when where while with yield").split(" "),
-);
+// A file with more lines than this is coloured a row at a time, as rows are drawn, instead
+// of top to bottom: a comment or string doesn't carry from one line to the next there, but
+// a huge file opens at once.
+export const WHOLE_FILE_LINES = 5000;
+
 const SQL_KEYWORDS = new Set(
   ("add alter and as asc begin between by case commit create cross delete desc distinct drop else end exists from " +
     "full group having if in index inner insert into is join key left like limit not null offset on or order outer " +
@@ -63,13 +115,16 @@ const WORD = /[A-Za-z_$][\w$]*/y;
 const ATTRIBUTE = /[@:#.]?[A-Za-z_][\w.:-]*(?=\s*=|\s|\/?>|$)/y;
 const TAG = /<\/?[A-Za-z][\w.:-]*/y;
 const DECORATOR = /@[A-Za-z_][\w.]*/y;
-const DEFINES = new Set(["def", "fn", "func", "function"]);
+const DEFINES = new Set(["def", "fn", "fun", "func", "function"]);
 const KEY_LINE = /^(\s*(?:-\s+)?)(["']?[\w.@/-]+["']?)(?=\s*[:=](?:\s|$))/;
+const ENV_KEY = /^(\s*(?:export\s+)?)([A-Za-z_][\w.]*)(?=\s*=)/;
 
-// The kind of language a path is written in, by extension or by a well-known name.
+// The kind of language a path is written in, by extension or by a well-known name. `.env`
+// and `.env.local`, `.env.test`, …, are env files whatever follows the dot.
 export function languageOf(path) {
   const name = String(path ?? "").split("/").pop();
   if (SPECIAL_NAMES[name]) return SPECIAL_NAMES[name];
+  if (name === ".env" || name.startsWith(".env.")) return "env";
   return name.includes(".") ? name.split(".").pop().toLowerCase() : "txt";
 }
 
@@ -89,7 +144,8 @@ export function syntaxColors(t) {
   };
 }
 
-const specFor = (language) => SPECS[ALIASES[language] ?? language] ?? C_LIKE;
+// A language it doesn't know is left plain: guessing it as code coloured prose.
+const specFor = (language) => SPECS[ALIASES[language] ?? language] ?? SPECS.txt;
 const closes = (line, at, quote) => {
   for (let i = at; i < line.length; i++) {
     if (line[i] === "\\") i++;
@@ -179,7 +235,8 @@ class Lexer {
 
   run() {
     if (this.open && !this.continueOpen()) return;
-    if (this.spec.keys) this.keyAtStart();
+    if (this.spec.keys) this.keyAtStart(KEY_LINE);
+    else if (this.spec.envKeys) this.keyAtStart(ENV_KEY);
     while (this.at < this.line.length) {
       if (this.inTag ? this.insideTag() : this.next()) continue;
       this.at++;
@@ -187,9 +244,9 @@ class Lexer {
     this.flushPlain();
   }
 
-  // `key:` in YAML, `key =` in TOML, a JSON key on its own line.
-  keyAtStart() {
-    const match = KEY_LINE.exec(this.line);
+  // `key:` in YAML, `key =` in TOML, a JSON key on its own line, `KEY=` in an env file.
+  keyAtStart(pattern) {
+    const match = pattern.exec(this.line);
     if (!match) return;
     this.at = match[1].length;
     this.emit(this.at + match[2].length, "property");
@@ -246,6 +303,11 @@ class Lexer {
     if (char === "`") return spec.template ? this.multiline("`") : this.quoted("`");
     if (/\d/.test(char) && !/[\w$]/.test(line[at - 1] ?? "")) {
       const number = this.sticky(NUMBER);
+      // In data, digits running into letters are a value like an id or a hash, not a number.
+      if (spec.data && /[A-Za-z_]/.test(line[at + number.length] ?? "")) {
+        this.at += this.sticky(/[\w-]+/y).length;
+        return true;
+      }
       this.emit(at + number.length, "number");
       return true;
     }
@@ -300,7 +362,7 @@ class Lexer {
     if (named && /^\s+$/.test(line.slice(this.lastWord.end, at))) return "function";
     const after = line.slice(at + word.length);
     const member = line[at - 1] === "." && line[at - 2] !== ".";
-    if (!member && KEYWORDS.has(word)) return "keyword";
+    if (!member && spec.keywords?.has(word)) return "keyword";
     if (CONSTANTS.has(word)) return "constant";
     if (/^\s*(?:\?\.)?\(/.test(after)) return member || !/^[A-Z]/.test(word) ? "function" : "type";
     if (TYPES.has(word) || /^[A-Z][A-Za-z\d]*[a-z][A-Za-z\d]*$/.test(word)) return "type";
