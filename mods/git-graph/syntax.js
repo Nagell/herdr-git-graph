@@ -46,6 +46,13 @@ const DOCKER_KEYWORDS = words(
   "ADD ARG AS CMD COPY ENTRYPOINT ENV EXPOSE FROM HEALTHCHECK LABEL ONBUILD RUN SHELL STOPSIGNAL USER VOLUME WORKDIR",
 );
 const MAKE_KEYWORDS = words("define else endef endif export ifdef ifeq ifndef ifneq include override");
+const GRAPHQL_KEYWORDS = words(
+  "directive enum extend fragment implements input interface mutation on query scalar schema subscription type union",
+);
+const PROTO_KEYWORDS = words(
+  "enum extend import map message oneof option optional package repeated required reserved returns rpc service stream syntax",
+);
+const PRISMA_KEYWORDS = words("datasource enum generator model type view");
 const NONE = new Set();
 
 const C_LIKE = { line: "//", block: ["/*", "*/"] };
@@ -70,7 +77,10 @@ const SPECS = {
   hash: { ...HASH, keywords: NONE },
   dockerfile: { ...HASH, keywords: DOCKER_KEYWORDS },
   makefile: { ...HASH, keywords: MAKE_KEYWORDS },
-  sql: { line: "--", block: ["/*", "*/"], anyCase: true },
+  graphql: { ...HASH, keywords: GRAPHQL_KEYWORDS },
+  proto: { ...C_LIKE, keywords: PROTO_KEYWORDS },
+  prisma: { ...C_LIKE, keywords: PRISMA_KEYWORDS },
+  sql:{ line: "--", block: ["/*", "*/"], anyCase: true },
   lua: { line: "--", keywords: LUA_KEYWORDS },
   hs: { line: "--", keywords: HS_KEYWORDS },
   json: { keys: true, data: true },
@@ -90,8 +100,22 @@ const ALIASES = {
   bash: "sh", zsh: "sh", fish: "sh", bashrc: "sh", zshrc: "sh", zshenv: "sh", zprofile: "sh", profile: "sh",
   nix: "hash", r: "hash", pl: "hash", ex: "hash", exs: "hash", tf: "hash", conf: "hash", gitignore: "hash",
   dockerignore: "hash", ini: "toml", editorconfig: "toml", npmrc: "toml", mk: "makefile", elm: "hs",
+  // JSON with comments, and JSON under other names.
+  "code-workspace": "jsonc", "code-snippets": "jsonc", json5: "jsonc", "sublime-settings": "jsonc",
+  "sublime-project": "jsonc", webmanifest: "json", ipynb: "json", geojson: "json", har: "json",
+  // Config and markup that read as their family.
+  properties: "toml", cfg: "toml", service: "toml", desktop: "toml", gitmodules: "toml",
+  gitattributes: "hash", ps1: "hash", psm1: "hash", gql: "graphql", mdx: "md",
+  csproj: "xml", vbproj: "xml", fsproj: "xml", props: "xml", targets: "xml", xaml: "xml", xsd: "xml", rss: "xml",
 };
-const SPECIAL_NAMES = { Dockerfile: "dockerfile", Makefile: "makefile", Justfile: "makefile", Gemfile: "rb", Rakefile: "rb" };
+const SPECIAL_NAMES = {
+  Dockerfile: "dockerfile", Containerfile: "dockerfile", Makefile: "makefile", GNUmakefile: "makefile",
+  Justfile: "makefile", Gemfile: "rb", Rakefile: "rb", Brewfile: "rb", Vagrantfile: "rb", Podfile: "rb",
+  Fastfile: "rb", Procfile: "hash", CODEOWNERS: "hash", ".babelrc": "jsonc", ".eslintrc": "jsonc",
+  ".prettierrc": "jsonc", ".swcrc": "jsonc", ".jshintrc": "jsonc", ".nuxtrc": "env", ".npmrc": "toml",
+};
+// JSON files that are known to allow comments, by name or by folder.
+const JSONC_NAME = /^(?:[jt]sconfig(?:\..+)?|devcontainer|\.devcontainer|deno|biome|turbo)\.json$/;
 
 // A file with more lines than this is coloured a row at a time, as rows are drawn, instead
 // of top to bottom: a comment or string doesn't carry from one line to the next there, but
@@ -122,10 +146,25 @@ const ENV_KEY = /^(\s*(?:export\s+)?)([A-Za-z_][\w.]*)(?=\s*=)/;
 // The kind of language a path is written in, by extension or by a well-known name. `.env`
 // and `.env.local`, `.env.test`, …, are env files whatever follows the dot.
 export function languageOf(path) {
-  const name = String(path ?? "").split("/").pop();
+  const parts = String(path ?? "").split("/");
+  const name = parts.pop();
   if (SPECIAL_NAMES[name]) return SPECIAL_NAMES[name];
   if (name === ".env" || name.startsWith(".env.")) return "env";
+  if (JSONC_NAME.test(name) || (name.endsWith(".json") && parts.at(-1) === ".vscode")) return "jsonc";
   return name.includes(".") ? name.split(".").pop().toLowerCase() : "txt";
+}
+
+// A Markdown code fence's language as the lexer's: the names people write (`typescript`,
+// `shell`) as well as extensions (`ts`, `sh`). None, or one it doesn't know, stays plain.
+const FENCE_NAMES = {
+  javascript: "js", node: "js", typescript: "ts", shell: "sh", shellscript: "sh", console: "sh", terminal: "sh",
+  zsh: "sh", bash: "sh", python: "py", python3: "py", ruby: "rb", rust: "rs", golang: "go", kotlin: "c",
+  java: "c", csharp: "c", "c#": "c", "c++": "c", cpp: "c", docker: "dockerfile", make: "makefile",
+  dotenv: "env", markdown: "md", text: "txt", plaintext: "txt", jsonc: "jsonc", json5: "jsonc", yml: "yaml",
+};
+export function fenceLanguage(word) {
+  const name = String(word ?? "").toLowerCase();
+  return FENCE_NAMES[name] ?? (name || "txt");
 }
 
 // The colour of each kind of run, from the theme, close to One Dark's choices.
