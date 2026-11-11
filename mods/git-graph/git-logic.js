@@ -1,6 +1,8 @@
 // Pure logic functions for Git Graph: ref parsing, topological DAG lane calculation,
 // file tree construction, and diff line formatting.
 
+import { languageOf, tokenizeLine } from "./syntax.js";
+
 /**
  * Resolves the effective repository root given the currently loaded root and a candidate cwd.
  * If cwd is inside currentRoot, currentRoot is preserved so subdirectories don't trigger
@@ -1541,268 +1543,7 @@ export function removeWorktreeArgs(path) {
 }
 
 // --- Diff syntax highlighting -------------------------------------------
-
-const KEYWORDS = {
-  js: new Set(
-    "const let var function return if else for while do switch case break continue new class extends super this import export from default async await try catch finally throw typeof instanceof in of null undefined true false static get set yield delete void interface type enum implements readonly public private protected as satisfies keyof namespace declare abstract override using".split(" ")
-  ),
-  py: new Set(
-    "def class return if elif else for while in not and or is None True False import from as try except finally raise with yield lambda pass break continue global nonlocal async await self match case".split(" ")
-  ),
-  go: new Set(
-    "func package import var const type struct interface map chan go defer return if else for range switch case break continue select nil true false make new len cap append string int bool byte rune error float64 float32 int64 int32 uint uint64 uint32 any fallthrough goto".split(" ")
-  ),
-  rs: new Set(
-    "fn let mut const struct enum impl trait use mod pub crate self Self super match if else loop while for in return break continue where async await move ref as dyn type unsafe extern true false None Some Ok Err static union".split(" ")
-  ),
-  sh: new Set(
-    "if then else elif fi for while until do done case esac function in select time export local readonly return exit set unset shift source alias declare typeset break continue".split(" ")
-  ),
-  sql: new Set(
-    "select from where join left right inner outer full on group by order having limit offset insert into values update set delete create table alter drop index view and or not null as distinct count sum avg min max union all case when then else end like in exists between is".split(" ")
-  ),
-  css: new Set(["none", "inherit", "initial", "unset", "revert", "auto", "transparent", "currentColor"]),
-  data: new Set(["true", "false", "null", "yes", "no", "on", "off"]),
-};
-
-const LANGS = {
-  js: { line: ["//"], block: ["/*", "*/"], quotes: ["'", '"', "`"], keywords: KEYWORDS.js, id: /[A-Za-z_$][\w$]*/y },
-  css: {
-    line: ["//"],
-    block: ["/*", "*/"],
-    quotes: ["'", '"'],
-    keywords: KEYWORDS.css,
-    css: true,
-    id: /-{0,2}[A-Za-z_][\w-]*/y,
-  },
-  json: { quotes: ['"'], keywords: KEYWORDS.data, json: true, id: /[A-Za-z_$][\w$]*/y },
-  py: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.py, id: /[A-Za-z_][\w]*/y },
-  go: { line: ["//"], block: ["/*", "*/"], quotes: ["'", '"', "`"], keywords: KEYWORDS.go, id: /[A-Za-z_][\w]*/y },
-  rs: { line: ["//"], block: ["/*", "*/"], quotes: ['"'], keywords: KEYWORDS.rs, id: /[A-Za-z_][\w]*/y },
-  sh: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.sh, id: /[A-Za-z_][\w]*/y },
-  sql: { line: ["--"], block: ["/*", "*/"], quotes: ["'", '"'], keywords: KEYWORDS.sql, id: /[A-Za-z_][\w$]*/y, ci: true },
-  yaml: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.data, key: ":", id: /[A-Za-z_][\w.-]*/y },
-  toml: { line: ["#"], quotes: ["'", '"'], keywords: KEYWORDS.data, key: "=", id: /[A-Za-z_][\w.-]*/y },
-  html: { block: ["<!--", "-->"], quotes: ["'", '"'], keywords: new Set(), html: true, id: /[A-Za-z_:][\w:.-]*/y },
-  plain: { keywords: new Set(), id: /[A-Za-z_$][\w$]*/y },
-};
-
-const EXTENSION_LANG = {
-  js: "js", mjs: "js", cjs: "js", jsx: "js", ts: "js", tsx: "js", mts: "js", cts: "js",
-  css: "css", scss: "css", sass: "css", less: "css",
-  json: "json", jsonc: "json", json5: "json",
-  py: "py", pyi: "py",
-  go: "go", rs: "rs",
-  sh: "sh", bash: "sh", zsh: "sh", fish: "sh",
-  sql: "sql",
-  yml: "yaml", yaml: "yaml",
-  toml: "toml",
-  html: "html", htm: "html", vue: "html", svelte: "html", xml: "html", svg: "html",
-};
-
-/** The highlighter family for a file path, by extension. */
-export function languageOf(path) {
-  const name = String(path ?? "");
-  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
-  return EXTENSION_LANG[ext] ?? "plain";
-}
-
-/** Index of the closing quote, honouring backslash escapes, or -1. */
-function closingQuote(text, from, quote) {
-  for (let i = from; i < text.length; i++) {
-    if (text[i] === "\\") {
-      i++;
-      continue;
-    }
-    if (text[i] === quote) return i;
-  }
-  return -1;
-}
-
-/**
- * Splits one line into coloured spans for a language.
- *
- * The scanner is deliberately small: comments, strings, numbers, keywords,
- * functions/types and (for CSS/YAML/TOML) keys and custom properties. Block
- * comments and template literals carry over into the next line through
- * `state`, so a multi-line comment is not repainted as code.
- *
- * @param {string} text
- * @param {string} language
- * @param {{ block?: boolean, quote?: string | null }} state
- * @returns {Array<{ text: string, kind: string }>}
- */
-export function tokenizeLine(text, language, state) {
-  const cfg = LANGS[language] ?? LANGS.plain;
-  /** @type {Array<{ text: string, kind: string }>} */
-  const spans = [];
-  const add = (kind, value) => {
-    if (value) spans.push({ text: value, kind });
-  };
-
-  let i = 0;
-  let pending = null;
-
-  // CSS declaration and YAML/TOML key: colour the leading name.
-  if (cfg.css) {
-    const m = /^(\s*)([A-Za-z-][\w-]*)(\s*):(?!:)/.exec(text);
-    if (m) {
-      add("plain", m[1]);
-      add("property", m[2]);
-      add("plain", m[3] + ":");
-      i = m[0].length;
-    }
-  } else if (cfg.key) {
-    const re = cfg.key === "=" ? /^(\s*)([A-Za-z_][\w.-]*)(\s*)=/ : /^(\s*(?:-\s+)?)([A-Za-z_][\w.-]*)(\s*):(?!:)/;
-    const m = re.exec(text);
-    if (m) {
-      add("plain", m[1]);
-      add("property", m[2]);
-      add("plain", m[3] + cfg.key);
-      i = m[0].length;
-    }
-  }
-
-  while (i < text.length) {
-    if (state.block) {
-      const end = cfg.block ? text.indexOf(cfg.block[1], i) : -1;
-      if (end === -1) {
-        add("comment", text.slice(i));
-        i = text.length;
-        break;
-      }
-      add("comment", text.slice(i, end + cfg.block[1].length));
-      i = end + cfg.block[1].length;
-      state.block = false;
-      continue;
-    }
-
-    if (state.quote) {
-      const end = closingQuote(text, i, state.quote);
-      if (end === -1) {
-        add("string", text.slice(i));
-        i = text.length;
-        break;
-      }
-      add("string", text.slice(i, end + 1));
-      i = end + 1;
-      state.quote = null;
-      continue;
-    }
-
-    if (cfg.block && text.startsWith(cfg.block[0], i)) {
-      const end = text.indexOf(cfg.block[1], i + cfg.block[0].length);
-      if (end === -1) {
-        add("comment", text.slice(i));
-        state.block = true;
-        i = text.length;
-        break;
-      }
-      add("comment", text.slice(i, end + cfg.block[1].length));
-      i = end + cfg.block[1].length;
-      continue;
-    }
-
-    const lineComment = (cfg.line ?? []).find(
-      (marker) => text.startsWith(marker, i) && (marker !== "#" || i === 0 || /[\s;([{,]/.test(text[i - 1]))
-    );
-    if (lineComment) {
-      add("comment", text.slice(i));
-      break;
-    }
-
-    if (cfg.css && text[i] === "@") {
-      const m = /^@[\w-]+/.exec(text.slice(i));
-      if (m) {
-        add("keyword", m[0]);
-        i += m[0].length;
-        continue;
-      }
-    }
-
-    if (cfg.css && text[i] === "#") {
-      const m = /^#[0-9a-fA-F]{3,8}\b/.exec(text.slice(i));
-      if (m) {
-        add("number", m[0]);
-        i += m[0].length;
-        continue;
-      }
-    }
-
-    if (cfg.quotes?.includes(text[i])) {
-      const quote = text[i];
-      const end = closingQuote(text, i + 1, quote);
-      const value = end === -1 ? text.slice(i) : text.slice(i, end + 1);
-      const after = end === -1 ? "" : text.slice(end + 1);
-      let kind = "string";
-      if (cfg.json && /^\s*:/.test(after)) kind = "property";
-      else if (cfg.html && /^\s*=/.test(after)) kind = "property";
-      add(kind, value);
-      if (end === -1 && quote === "`") state.quote = quote;
-      i = end === -1 ? text.length : end + 1;
-      continue;
-    }
-
-    if (/[0-9]/.test(text[i]) || (text[i] === "." && /[0-9]/.test(text[i + 1] ?? ""))) {
-      const m = /^(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:[a-zA-Z%]+)?/.exec(text.slice(i));
-      if (m) {
-        add("number", m[0]);
-        i += m[0].length;
-        continue;
-      }
-    }
-
-    if (cfg.html && text[i] === "<") {
-      const m = /^<\/?([A-Za-z][\w:-]*)/.exec(text.slice(i));
-      if (m) {
-        add("punct", m[0].startsWith("</") ? "</" : "<");
-        add("type", m[1]);
-        i += m[0].length;
-        continue;
-      }
-    }
-
-    cfg.id.lastIndex = i;
-    const id = cfg.id.exec(text);
-    if (id && id.index === i) {
-      const word = id[0];
-      i += word.length;
-      const after = text.slice(i);
-      const key = cfg.ci ? word.toLowerCase() : word;
-      let kind = "plain";
-
-      if (cfg.keywords?.has(key)) {
-        kind = "keyword";
-        if (["def", "function", "fn", "func"].includes(key)) pending = "function";
-        else if (["class", "struct", "enum", "interface", "trait", "type"].includes(key)) pending = "type";
-      } else if (pending === "function") {
-        kind = "function";
-        pending = null;
-      } else if (pending === "type") {
-        kind = "type";
-        pending = null;
-      } else if (cfg.css && after.startsWith("(")) {
-        kind = "function";
-      } else if (cfg.css && word.startsWith("--")) {
-        kind = "property";
-      } else if (cfg.html && /^\s*=/.test(after)) {
-        kind = "property";
-      } else if (cfg.json && /^\s*:/.test(after)) {
-        kind = "property";
-      } else if (/^[A-Z][A-Za-z0-9_$]*$/.test(word) && (language === "js" || language === "rs")) {
-        kind = "type";
-      }
-
-      add(kind, word);
-      continue;
-    }
-
-    add("plain", text[i]);
-    i++;
-  }
-
-  return spans;
-}
+// The lexer is syntax.js, shared byte for byte with Better Files and Better Changes.
 
 /**
  * Adds syntax spans to parsed diff rows. Removed and added lines are tokenized
@@ -1814,20 +1555,22 @@ export function tokenizeLine(text, language, state) {
  */
 export function highlightRows(rows, path) {
   const language = languageOf(path);
-  const oldState = /** @type {any} */ ({});
-  const newState = /** @type {any} */ ({});
+  let oldState = null;
+  let newState = null;
+  // syntax.js marks plain text with kind null; the diff renderer calls it "plain".
+  const spansOf = (runs) => runs.map((run) => ({ text: run.text, kind: run.kind ?? "plain" }));
 
   return rows.map((row) => {
     if (row.kind === "@" || row.kind === "\\") return row;
     if (row.kind === "-") {
-      return { ...row, spans: tokenizeLine(row.text, language, oldState) };
+      const result = tokenizeLine(row.text, language, oldState);
+      oldState = result.state;
+      return { ...row, spans: spansOf(result.runs) };
     }
-    const spans = tokenizeLine(row.text, language, newState);
-    if (row.kind === " ") {
-      oldState.block = newState.block;
-      oldState.quote = newState.quote;
-    }
-    return { ...row, spans };
+    const result = tokenizeLine(row.text, language, newState);
+    newState = result.state;
+    if (row.kind === " ") oldState = newState;
+    return { ...row, spans: spansOf(result.runs) };
   });
 }
 

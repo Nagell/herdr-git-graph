@@ -115,6 +115,7 @@ import {
   commitArgs,
   hasWorktreeWatchChange,
 } from "./git-logic.js";
+import { syntaxColors } from "./syntax.js";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const NON_INTERACTIVE = ["-c", "core.editor=true", "-c", "core.pager=cat"];
@@ -935,24 +936,8 @@ export default class GitGraph extends View {
 
   /** Theme color for a token kind emitted by the diff highlighter. */
   tokenColor(kind, t) {
-    switch (kind) {
-      case "keyword":
-        return t.ansi5;
-      case "string":
-        return t.ansi2;
-      case "number":
-        return t.ansi3;
-      case "comment":
-        return t.dim;
-      case "function":
-        return t.ansi4;
-      case "property":
-        return t.ansi6;
-      case "type":
-        return t.ansi4;
-      default:
-        return null;
-    }
+    // The same colours as Better Files and Better Changes (syntax.js).
+    return (kind && syntaxColors(t)[kind]) ?? null;
   }
 
   /** One row of the unified diff: both gutters, a sign, and the line. */

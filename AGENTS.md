@@ -125,6 +125,7 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
   - The toolbar matches `file-editor`'s visual language with uniform 24×24 buttons and segmented controls: switches between **Inline** (unified), **Split** (side by side) and **Stacked** (old above new) using native layout icons (`diff-inline.svg`, `diff-split.svg`, `diff-stacked.svg`). The choice persists in `shared("git-graph.diffView")`. Both split panes use one `VirtualListScrollHandle`, so vertical scrolling stays in lockstep while each pane keeps its own horizontal scrollbar.
   - **Wrap** toggles soft wrapping for long lines in every layout using the standard `wrap.svg` icon button and persists in `shared("git-graph.diffWrap")`. Wrapped lines are expanded by `wrapInlineRows` / `wrapSplitRows` into consecutive 22px display rows, so both panes stay aligned; line numbers stay on the first chunk, and syntax spans plus intra-line change ranges carry into continuations. The diff tab's own `on_size_change` feeds `this.width`, which sets the wrap column count.
   - Action buttons beside the layout controls provide **Open in file editor** (`open-file.svg`), **Copy diff** (`copy.svg`), and **Refresh diff** (`refresh.svg`, animated with `.spin(900)` while reloading).
+  - Syntax colours come from `mods/git-graph/syntax.js`, a byte-for-byte copy of the lexer Better Files and Better Changes share ([herdr-mods](https://github.com/munza/herdr-mods)): `highlightRows` runs its `tokenizeLine` per diff side (its `null` kind becomes `"plain"`), and `tokenColor` uses its `syntaxColors(t)`. Update it by copying the file again, never by editing it here.
   - `git-logic.js` pairs each removed line with its added counterpart and computes character-level change ranges (`intraLineDiff`): word-level LCS first, character refinement inside changed words, and a whole-middle fallback for rewrites. `lineSegments` overlays those ranges on the syntax spans, which the renderer paints with a stronger `ansi1`/`ansi2` background.
   - A diff tab is a second mode of the same mod (`props: { folder, diffFile, diffKind: "worktree" | "commit", diffHash?, on?, diffView?, diffWrap? }`). Clicking a file already open by name selects that tab instead of duplicating it.
   - Working-tree diffs watch the repository and refresh; untracked files are shown as synthesized all-added diffs.
@@ -154,7 +155,7 @@ The script copies `mods/git-graph` to `~/.config/herdr-app/mods/git-graph` and r
 Run the test suite:
 
 ```sh
-node --test test/
+node --test test/*.test.js
 ```
 
 ## How to Open in Herdr

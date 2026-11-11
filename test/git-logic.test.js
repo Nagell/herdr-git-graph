@@ -79,6 +79,7 @@ import {
   discardAllArgs,
   commitArgs,
   hasWorktreeWatchChange,
+  highlightRows,
 } from "../mods/git-graph/git-logic.js";
 
 test("workingTreeState: splits index and working-tree sides", () => {
@@ -2093,4 +2094,26 @@ test("hasWorktreeWatchChange: ignores Git metadata churn from the watcher", () =
   // Windows separators normalize the same way.
   assert.equal(hasWorktreeWatchChange("C:\\repo", ["C:\\repo\\.git\\index"]), false);
   assert.equal(hasWorktreeWatchChange("C:\\repo", ["C:\\repo\\src\\main.js"]), true);
+});
+
+test("highlightRows colours diff lines with syntax.js and keeps each side's state", () => {
+  const rows = highlightRows(
+    [
+      { kind: "@", text: "@@ -1,3 +1,3 @@" },
+      { kind: "-", text: "/* old" },
+      { kind: "+", text: "const a = 1;" },
+      { kind: "-", text: "still comment */ return" },
+      { kind: " ", text: "<div class=\"x\">" },
+    ],
+    "src/app.vue",
+  );
+  assert.equal(rows[0].spans, undefined);
+  // A comment opened on the removed side carries to the next removed line only.
+  assert.deepEqual(rows[1].spans, [{ text: "/* old", kind: "comment" }]);
+  assert.deepEqual(rows[2].spans.find((s) => s.text === "const"), { text: "const", kind: "keyword" });
+  assert.equal(rows[3].spans[0].kind, "comment");
+  assert.deepEqual(rows[3].spans.find((s) => s.text === "return"), { text: "return", kind: "keyword" });
+  // Markup is coloured too, and plain text is "plain", never null.
+  assert.deepEqual(rows[4].spans[0], { text: "<div", kind: "tag" });
+  assert.ok(rows.every((row) => (row.spans ?? []).every((s) => typeof s.kind === "string")));
 });
