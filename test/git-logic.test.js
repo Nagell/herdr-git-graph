@@ -62,6 +62,8 @@ import {
   mergedCheckArgs,
   removeWorktreeArgs,
   normalizeCheckoutPath,
+  repoNameFromUrl,
+  cloneDestination,
   SPACE_ACTIONS_MOD,
   parseTreeAgentSession,
   contextMenuPosition,
@@ -1954,4 +1956,25 @@ test("resolvePeekTransition: detects opened and closed state transitions", () =>
   assert.equal(resolvePeekTransition(false, true), "closed");
   // Staying closed
   assert.equal(resolvePeekTransition(false, false), null);
+});
+
+test("repoNameFromUrl: derives a folder name from every clone URL shape", () => {
+  assert.equal(repoNameFromUrl("https://github.com/user/repo.git"), "repo");
+  assert.equal(repoNameFromUrl("https://github.com/user/repo"), "repo");
+  assert.equal(repoNameFromUrl("https://github.com/user/repo/"), "repo");
+  assert.equal(repoNameFromUrl("git@github.com:user/repo.git"), "repo");
+  assert.equal(repoNameFromUrl("ssh://git@host:2222/user/repo.git"), "repo");
+  assert.equal(repoNameFromUrl("file:///tmp/project"), "project");
+  assert.equal(repoNameFromUrl("/tmp/my project"), "my-project");
+  assert.equal(repoNameFromUrl("../../"), "repository");
+  assert.equal(repoNameFromUrl(""), "repository");
+});
+
+test("cloneDestination: empty folders clone in place, dirty ones get a subfolder", () => {
+  assert.equal(cloneDestination("/tmp/project", "https://github.com/u/repo.git", false), "/tmp/project");
+  assert.equal(cloneDestination("/tmp/project/", "https://github.com/u/repo.git", false), "/tmp/project");
+  assert.equal(cloneDestination("/tmp/project", "https://github.com/u/repo.git", true), "/tmp/project/repo");
+  assert.equal(cloneDestination("/", "https://github.com/u/repo.git", true), "/repo");
+  assert.equal(cloneDestination("C:\\work", "https://github.com/u/repo.git", true), "C:\\work\\repo");
+  assert.equal(cloneDestination("", "https://github.com/u/repo.git", true), "repo");
 });
