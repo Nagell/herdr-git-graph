@@ -13,8 +13,6 @@ import {
   v_virtual_list,
   Scrollbar,
   VirtualListScrollHandle,
-  v_resizable,
-  resizable_panel,
 } from "gpui-base";
 import {
   spaces,
@@ -122,6 +120,13 @@ import { syntaxColors } from "./syntax.js";
 // height, so either one can take nearly the whole split.
 const SPLIT_PANE_MIN = 40;
 const DETAILS_SHARE_KEY = "detailsShare";
+// The split's last measured height, for the panel and for a full tab, kept while the mod
+// is loaded: a view built again when the panel comes back starts from it, so its first
+// frame already has the details pane at its height.
+const lastSplitHeight = { panel: 0, tab: 0 };
+const splitPlace = () => (props()?.panel ? "panel" : "tab");
+// The divider between the commit list and the details pane: what it takes to grab it.
+const SPLIT_HANDLE = 6;
 
 /** The details pane's share of the split from the mod's localStorage; half when unset. */
 function readDetailsShare() {
@@ -464,7 +469,7 @@ export default class GitGraph extends View {
     // Height of the commit list + details split, measured, and the details pane's share
     // of it: half to start, then whatever the last drag left, kept in the mod's own
     // localStorage so it outlives a restart.
-    this.splitHeight = 0;
+    this.splitHeight = lastSplitHeight[splitPlace()];
     this.detailsShare = readDetailsShare();
     this.manualRoot = null;
     // Machine that owns `manualRoot`. A folder picked locally runs git here,
@@ -1323,17 +1328,42 @@ export default class GitGraph extends View {
   updateSplitHeight(size, cx) {
     const zoom = Number(settings()?.zoom) || 1;
     const h = size && typeof size.height === "number" ? Math.round(size.height / zoom) : 0;
+    if (h > 0) lastSplitHeight[splitPlace()] = h;
     if (h !== this.splitHeight) {
       this.splitHeight = h;
       cx.notify();
     }
   }
 
-  /** Keeps the details pane's share of the split after a drag (sizes: list, details). */
-  saveDetailsShare(sizes) {
-    const total = (sizes?.[0] ?? 0) + (sizes?.[1] ?? 0);
-    if (!(total > 0)) return;
-    this.detailsShare = clampDetailsShare(sizes[1] / total);
+  /** The details pane's height: its share of the split, leaving both panes their minimum. */
+  detailsHeight() {
+    const room = this.splitHeight - SPLIT_HANDLE;
+    return Math.round(Math.min(room - SPLIT_PANE_MIN, Math.max(SPLIT_PANE_MIN, room * this.detailsShare)));
+  }
+
+  /** A press on the divider: the drag follows the pointer from here. */
+  startSplitDrag(e, cx) {
+    cx.stop_propagation();
+    this.splitDrag = { y: e.position.y, share: this.detailsShare };
+  }
+
+  /** The pointer moving over the split while the divider is held: up gives the details pane more. */
+  dragSplit(e, cx) {
+    const drag = this.splitDrag;
+    const room = this.splitHeight - SPLIT_HANDLE;
+    if (!drag || !(room > 0)) return;
+    const zoom = Number(settings()?.zoom) || 1;
+    const share = clampDetailsShare(drag.share - (e.position.y - drag.y) / zoom / room);
+    if (share !== this.detailsShare) {
+      this.detailsShare = share;
+      cx.notify();
+    }
+  }
+
+  /** The divider let go (or the pointer left the split): the share is kept for next time. */
+  endSplitDrag() {
+    if (!this.splitDrag) return;
+    this.splitDrag = null;
     try {
       localStorage.setItem(DETAILS_SHARE_KEY, String(this.detailsShare));
     } catch {}
@@ -10716,34 +10746,49 @@ export default class GitGraph extends View {
           .when(!isCompact, (e) => e.child(div().w(130).flex_none().truncate().child("Author")))
           .when(!isCompact, (e) => e.child(div().w(70).flex_none().text_center().child("Commit")))
       )
-      // Commit list + resizable details pane. The native group owns the drag
-      // handle, so the bottom pane keeps its size across repaints. The box around
-      // it is always there, so its height is known before a commit is selected:
-      // the pane opens at its share of that height (see `detailsShare`).
+      // Commit list + details pane, split by a divider drawn here rather than Herdr's
+      // resizable group: that group lays out its first frame half and half whenever it
+      // is built again (the panel coming back from Files), then jumps to the size it
+      // keeps. Here the details pane has its height from the first frame. The box is
+      // always there, so its height is known before a commit is selected.
       .child(
         v_flex()
           .id("git-graph-split-box")
           .flex_1()
           .min_h(0)
           .on_size_change((size, cx) => this.updateSplitHeight(size, cx))
+          .on_mouse_move((e, cx) => this.dragSplit(e, cx))
+          .on_mouse_up("left", () => this.endSplitDrag())
+          .on_hover((hovered) => {
+            if (!hovered) this.endSplitDrag();
+          })
           .when(Boolean(this.selectedCommit) && this.splitHeight > 0, (e) =>
-            e.child(
-              v_resizable("git-graph-split")
-                .flex_1()
-                .min_h(0)
-                .on_resize((sizes) => this.saveDetailsShare(sizes))
-                .child(
-                  resizable_panel()
-                    .size_range(SPLIT_PANE_MIN)
-                    .child(this.renderCommitArea(t, isCompact, cx))
-                )
-                .child(
-                  resizable_panel()
-                    .size(Math.round(this.splitHeight * this.detailsShare))
-                    .size_range(SPLIT_PANE_MIN)
-                    .child(this.renderDetailsPanel(t, isCompact, cx))
-                )
-            )
+            e
+              .child(v_flex().flex_1().min_h(0).child(this.renderCommitArea(t, isCompact, cx)))
+              .child(
+                div()
+                  .id("git-graph-split-handle")
+                  .h(SPLIT_HANDLE)
+                  .w_full()
+                  .flex_none()
+                  .flex()
+                  .items_center()
+                  .cursor_row_resize()
+                  .on_mouse_down("left", (ev, cx) => this.startSplitDrag(ev, cx))
+                  .child(
+                    div()
+                      .h(1)
+                      .w_full()
+                      .bg(color(this.splitDrag ? t.accent : t.border))
+                  )
+              )
+              .child(
+                v_flex()
+                  .h(this.detailsHeight())
+                  .flex_none()
+                  .min_h(0)
+                  .child(this.renderDetailsPanel(t, isCompact, cx))
+              )
           )
           .when(!this.selectedCommit || this.splitHeight === 0, (e) => e.child(this.renderCommitArea(t, isCompact, cx)))
       )
