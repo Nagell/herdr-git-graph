@@ -1105,16 +1105,16 @@ export default class GitGraph extends View {
       );
   }
 
-  /** The hatched-looking filler on the side where a paired line has no counterpart. */
-  splitFillerCell(t) {
-    return h_flex().w_full().h(22).flex_none().bg(color(t.raised + "40"));
+  /** The empty row on the side where a paired line has no counterpart: plain, like the rest. */
+  splitFillerCell() {
+    return h_flex().w_full().h(22).flex_none();
   }
 
   /** One row of a split pane; both panes get the same row count and heights. */
   splitRow(row, side, t) {
     if (row.kind === "pair") {
       const cell = side === "old" ? row.left : row.right;
-      return cell ? this.splitLineCell(cell, t) : this.splitFillerCell(t);
+      return cell ? this.splitLineCell(cell, t) : this.splitFillerCell();
     }
 
     if (row.kind === "@") {
