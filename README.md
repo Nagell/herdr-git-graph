@@ -207,7 +207,7 @@ File and folder icons are from [Material Icon Theme](https://github.com/PKief/vs
 
 ## Shared lexer
 
-`mods/git-graph/syntax.js` is a byte-for-byte copy of [herdr-mods](https://github.com/munza/herdr-mods)' lexer. Refresh it from a herdr-mods checkout (`$HERDR_MODS`, default `~/.local/src/herdr-mods`), and `node --test test/*.test.js` fails while it's stale:
+`mods/git-graph/syntax.js` is a byte-for-byte copy of [herdr-mods](https://github.com/munza/herdr-mods)' lexer, and `mods/git-graph/file-icons.js` of Better Icons' resolver: with [Better Icons](https://github.com/munza/herdr-mods/tree/main/better-icons) installed, files and folders get its Material icons, otherwise this mod's own. Refresh it from a herdr-mods checkout (`$HERDR_MODS`, default `~/.local/src/herdr-mods`), and `node --test test/*.test.js` fails while it's stale:
 
 ```sh
 ./sync-shared.sh

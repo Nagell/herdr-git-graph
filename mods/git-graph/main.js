@@ -115,6 +115,7 @@ import {
   clampDetailsShare,
 } from "./git-logic.js";
 import { syntaxColors } from "./syntax.js";
+import { fileIcon, followFileIcons } from "./file-icons.js";
 
 // The details pane and the commit list above it can each be dragged down to this
 // height, so either one can take nearly the whole split.
@@ -383,6 +384,8 @@ async function detectInProgress(root, on) {
 export default class GitGraph extends View {
   init(_props, cx) {
     const p = props() || {};
+    // Better Icons' colour icons when it's installed; this mod's own otherwise.
+    followFileIcons(this, cx);
     // A diff viewer tab: the mod is opened with { diffFile, diffKind, diffHash? }
     // and renders that one diff full size instead of the graph.
     this.diffMode = typeof p.diffFile === "string" && p.diffFile.length > 0;
@@ -1412,7 +1415,7 @@ export default class GitGraph extends View {
           .bg(color(t.chrome))
           .border_b(1)
           .border_color(color(t.border))
-          .child(image(fileIconPath(base, isLightColor(t.background))).size(14).flex_none())
+          .child(image(this.iconFor(path || base, t)).size(14).flex_none())
           .child(div().font_semibold().text_size(12.5).truncate().child(base))
           .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(color(t.dim)).child(dir))
           .when(this.diffAdd > 0, (e) =>
@@ -5412,10 +5415,18 @@ export default class GitGraph extends View {
    * ids, hover and folder collapse apart when a path is listed under both
    * Staged Changes and Changes.
    */
+  /** A file's or folder's icon: Better Icons' when installed, else this mod's own. */
+  iconFor(path, t, { dir = false } = {}) {
+    const light = isLightColor(t.background);
+    const picked = this.fileIcons && fileIcon(this.fileIcons, path, { dir, light });
+    if (picked) return picked;
+    return dir ? FOLDER_ICON_PATH : fileIconPath(path.split("/").pop() || path, light);
+  }
+
   renderTreeRow(row, t, cx, group = null) {
     const key = group ? `${group}:${row.path}` : row.path;
     const isFileSelected = !row.isDir && this.selectedFile === row.path;
-    const iconPath = row.isDir ? FOLDER_ICON_PATH : fileIconPath(row.name, isLightColor(t.background));
+    const iconPath = this.iconFor(row.path || row.name, t, { dir: row.isDir });
     const status = row.status || "M";
     const diffable = row.isDir || isDiffable(row.path, row.file);
     const tip = row.isDir
@@ -8756,7 +8767,7 @@ export default class GitGraph extends View {
                 .py(4)
                 .gap(6)
                 .items_center()
-                .child(image(fileIconPath(file.name, isLightColor(t.background))).size(14).flex_none())
+                .child(image(this.iconFor(normPath || file.name, t)).size(14).flex_none())
                 .child(div().flex_1().min_w(0).truncate().font_semibold().child(normPath))
                 .when(Boolean(file.status), (e) =>
                   e.child(
