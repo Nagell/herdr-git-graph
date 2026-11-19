@@ -1004,8 +1004,8 @@ export default class GitGraph extends View {
       .w_full()
       .h(22)
       .flex_none()
-      .when(add, (e) => e.bg(color(t.ansi2 + "18")))
-      .when(del, (e) => e.bg(color(t.ansi1 + "18")))
+      .when(add, (e) => e.bg(color(t.ansi2.slice(0, 7) + "26")))
+      .when(del, (e) => e.bg(color(t.ansi1.slice(0, 7) + "26")))
       .child(
         div()
           .w(44)
@@ -1062,8 +1062,8 @@ export default class GitGraph extends View {
       .w_full()
       .h(22)
       .flex_none()
-      .when(add, (e) => e.bg(color(t.ansi2 + "18")))
-      .when(del, (e) => e.bg(color(t.ansi1 + "18")))
+      .when(add, (e) => e.bg(color(t.ansi2.slice(0, 7) + "26")))
+      .when(del, (e) => e.bg(color(t.ansi1.slice(0, 7) + "26")))
       .child(
         div()
           .w(44)
