@@ -205,6 +205,14 @@ Diffs open in the last layout used (Inline, Split, or Stacked) and remember it a
 
 File and folder icons are from [Material Icon Theme](https://github.com/PKief/vscode-material-icon-theme), MIT License. See `mods/git-graph/icons/LICENSE.txt`.
 
+## Shared lexer
+
+`mods/git-graph/syntax.js` is a byte-for-byte copy of [herdr-mods](https://github.com/munza/herdr-mods)' lexer. Refresh it from a herdr-mods checkout (`$HERDR_MODS`, default `~/.local/src/herdr-mods`), and `node --test test/*.test.js` fails while it's stale:
+
+```sh
+./sync-shared.sh
+```
+
 ## Install & Sync
 
 Sync `mods/git-graph` into `~/.config/herdr-app/mods/`:
