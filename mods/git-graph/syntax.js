@@ -1,7 +1,7 @@
 // syntax.js: code as coloured runs, for views that draw their own rows. Herdr's highlighter
 // only reaches its Editor, which can't draw a diff or mark a line, so this is a small lexer:
 // no grammar, but block comments, template strings and open tags carry from line to line.
-// Shared byte for byte between Better Files, Better Changes and Git Graph.
+// Shared byte for byte between Better Files and Better Changes; a test checks they match.
 
 // Each language's own keywords: a word is a keyword only in the languages that have it, so
 // `local` stays plain in TypeScript and `for` stays plain in an env file's comment.
@@ -57,30 +57,36 @@ const NONE = new Set();
 
 const C_LIKE = { line: "//", block: ["/*", "*/"] };
 const HASH = { line: "#" };
+// `regex`: a `/` where a value can start opens a regex literal, so `/\/*$/` opens no comment.
+const JS_LIKE = { ...C_LIKE, template: true, regex: true, keywords: JS_KEYWORDS };
 const SPECS = {
-  js: { ...C_LIKE, template: true, keywords: JS_KEYWORDS },
-  ts: { ...C_LIKE, template: true, keywords: JS_KEYWORDS },
-  jsx: { ...C_LIKE, template: true, markup: true, keywords: JS_KEYWORDS },
-  tsx: { ...C_LIKE, template: true, markup: true, keywords: JS_KEYWORDS },
-  vue: { ...C_LIKE, template: true, markup: true, markupComment: true, keywords: JS_KEYWORDS },
-  svelte: { ...C_LIKE, template: true, markup: true, markupComment: true, keywords: JS_KEYWORDS },
-  astro: { ...C_LIKE, template: true, markup: true, markupComment: true, keywords: JS_KEYWORDS },
+  js: JS_LIKE,
+  ts: JS_LIKE,
+  jsx: { ...JS_LIKE, markup: true },
+  tsx: { ...JS_LIKE, markup: true },
+  vue: { ...JS_LIKE, markup: true, markupComment: true },
+  svelte: { ...JS_LIKE, markup: true, markupComment: true },
+  astro: { ...JS_LIKE, markup: true, markupComment: true },
   html: { markup: true, markupComment: true, keywords: NONE },
   xml: { markup: true, markupComment: true, keywords: NONE },
   css: { block: ["/*", "*/"], keys: true, keywords: NONE },
-  go: { ...C_LIKE, template: true, keywords: GO_KEYWORDS },
+  // Go's backtick strings are raw: a backslash in them is just a backslash.
+  go: { ...C_LIKE, template: true, rawTemplate: true, keywords: GO_KEYWORDS },
   rs: { ...C_LIKE, charQuotes: true, keywords: RS_KEYWORDS },
   c: { ...C_LIKE, charQuotes: true, keywords: C_KEYWORDS },
+  // PHP, Dart and Groovy quote strings with ' as well as ", unlike C's single characters.
+  cstr: { ...C_LIKE, keywords: C_KEYWORDS },
   py: { ...HASH, triple: true, keywords: PY_KEYWORDS },
   rb: { ...HASH, keywords: RB_KEYWORDS },
-  sh: { ...HASH, keywords: SH_KEYWORDS },
+  // In shell a # starts a comment only at the start of a word, so `${#arr[@]}` and `$#` aren't.
+  sh: { ...HASH, wordComment: true, keywords: SH_KEYWORDS },
   hash: { ...HASH, keywords: NONE },
   dockerfile: { ...HASH, keywords: DOCKER_KEYWORDS },
   makefile: { ...HASH, keywords: MAKE_KEYWORDS },
-  graphql: { ...HASH, keywords: GRAPHQL_KEYWORDS },
+  graphql: { ...HASH, triple: true, keywords: GRAPHQL_KEYWORDS },
   proto: { ...C_LIKE, keywords: PROTO_KEYWORDS },
   prisma: { ...C_LIKE, keywords: PRISMA_KEYWORDS },
-  sql:{ line: "--", block: ["/*", "*/"], anyCase: true },
+  sql: { line: "--", block: ["/*", "*/"], anyCase: true },
   lua: { line: "--", keywords: LUA_KEYWORDS },
   hs: { line: "--", keywords: HS_KEYWORDS },
   json: { keys: true, data: true },
@@ -96,7 +102,7 @@ const ALIASES = {
   mjs: "js", cjs: "js", mts: "ts", cts: "ts", htm: "html", svg: "xml", plist: "xml",
   scss: "jsonc", less: "jsonc", yml: "yaml", markdown: "md", log: "txt", csv: "txt",
   h: "c", cc: "c", cpp: "c", cxx: "c", hh: "c", hpp: "c", hxx: "c", m: "c", mm: "c", java: "c",
-  kt: "c", kts: "c", swift: "c", cs: "c", php: "c", dart: "c", scala: "c", groovy: "c", gradle: "c",
+  kt: "c", kts: "c", swift: "c", cs: "c", php: "cstr", dart: "cstr", scala: "c", groovy: "cstr", gradle: "cstr",
   bash: "sh", zsh: "sh", fish: "sh", bashrc: "sh", zshrc: "sh", zshenv: "sh", zprofile: "sh", profile: "sh",
   nix: "hash", r: "hash", pl: "hash", ex: "hash", exs: "hash", tf: "hash", conf: "hash", gitignore: "hash",
   dockerignore: "hash", ini: "toml", editorconfig: "toml", npmrc: "toml", mk: "makefile", elm: "hs",
@@ -115,7 +121,7 @@ const SPECIAL_NAMES = {
   ".prettierrc": "jsonc", ".swcrc": "jsonc", ".jshintrc": "jsonc", ".nuxtrc": "env", ".npmrc": "toml",
 };
 // JSON files that are known to allow comments, by name or by folder.
-const JSONC_NAME = /^(?:[jt]sconfig(?:\..+)?|devcontainer|\.devcontainer|deno|biome|turbo)\.json$/;
+const JSONC_NAME = /^(?:[jt]sconfig(?:[._-].+)?|devcontainer|\.devcontainer|deno|biome|turbo)\.json$/;
 
 // A file with more lines than this is coloured a row at a time, as rows are drawn, instead
 // of top to bottom: a comment or string doesn't carry from one line to the next there, but
@@ -139,6 +145,7 @@ const WORD = /[A-Za-z_$][\w$]*/y;
 const ATTRIBUTE = /[@:#.]?[A-Za-z_][\w.:-]*(?=\s*=|\s|\/?>|$)/y;
 const TAG = /<\/?[A-Za-z][\w.:-]*/y;
 const DECORATOR = /@[A-Za-z_][\w.]*/y;
+const REGEX_AFTER = new Set("return typeof case do else in of new delete void throw yield await".split(" "));
 const DEFINES = new Set(["def", "fn", "fun", "func", "function"]);
 const KEY_LINE = /^(\s*(?:-\s+)?)(["']?[\w.@/-]+["']?)(?=\s*[:=](?:\s|$))/;
 const ENV_KEY = /^(\s*(?:export\s+)?)([A-Za-z_][\w.]*)(?=\s*=)/;
@@ -185,9 +192,9 @@ export function syntaxColors(t) {
 
 // A language it doesn't know is left plain: guessing it as code coloured prose.
 const specFor = (language) => SPECS[ALIASES[language] ?? language] ?? SPECS.txt;
-const closes = (line, at, quote) => {
+const closes = (line, at, quote, raw = false) => {
   for (let i = at; i < line.length; i++) {
-    if (line[i] === "\\") i++;
+    if (line[i] === "\\" && !raw) i++;
     else if (line.startsWith(quote, i)) return i + quote.length;
   }
   return -1;
@@ -207,7 +214,9 @@ export function highlightLines(lines, language) {
 // template string, a tag); pass it with the next line, or null to start fresh.
 export function tokenizeLine(line, language, state = null) {
   const spec = specFor(language);
-  if (spec.plain || line.length > HIGHLIGHT_CHARS) return { runs: [{ text: line, kind: null }], state: null };
+  if (spec.plain) return { runs: [{ text: line, kind: null }], state: null };
+  // A very long line stays plain, but whatever was open before it is still open after it.
+  if (line.length > HIGHLIGHT_CHARS) return { runs: [{ text: line, kind: null }], state };
   if (spec.markdown) return { runs: markdownRuns(line), state: null };
   const lexer = new Lexer(line, spec, state);
   lexer.run();
@@ -233,13 +242,14 @@ class Lexer {
     this.spec = spec;
     this.open = state?.open ?? null;
     this.inTag = state?.inTag ?? false;
+    this.braces = state?.braces ?? 0;
     this.at = 0;
     this.plainFrom = 0;
     this.runs = [];
   }
 
   state() {
-    return this.open || this.inTag ? { open: this.open, inTag: this.inTag } : null;
+    return this.open || this.inTag ? { open: this.open, inTag: this.inTag, braces: this.braces } : null;
   }
 
   emit(end, kind) {
@@ -262,7 +272,7 @@ class Lexer {
   // Finishes whatever an earlier line left open; false while it's still open at the end.
   continueOpen() {
     const { kind, until } = this.open;
-    const end = kind === "comment" ? this.line.indexOf(until, this.at) : closes(this.line, this.at, until);
+    const end = kind === "comment" ? this.line.indexOf(until, this.at) : closes(this.line, this.at, until, this.open.raw);
     if (end < 0) {
       this.emit(this.line.length, kind);
       return false;
@@ -273,9 +283,12 @@ class Lexer {
   }
 
   run() {
+    // A key only starts a line that nothing was left open on: after a comment closes
+    // mid-line, the text before it is already drawn.
+    const fresh = !this.open && !this.inTag;
     if (this.open && !this.continueOpen()) return;
-    if (this.spec.keys) this.keyAtStart(KEY_LINE);
-    else if (this.spec.envKeys) this.keyAtStart(ENV_KEY);
+    if (fresh && this.spec.keys) this.keyAtStart(KEY_LINE);
+    else if (fresh && this.spec.envKeys) this.keyAtStart(ENV_KEY);
     while (this.at < this.line.length) {
       if (this.inTag ? this.insideTag() : this.next()) continue;
       this.at++;
@@ -291,14 +304,27 @@ class Lexer {
     this.emit(this.at + match[2].length, "property");
   }
 
+  // Inside a tag, `{ … }` is code (a JSX or Svelte expression), so its `=>` doesn't close the tag.
   insideTag() {
     const { line, at } = this;
+    if (line[at] === "{") {
+      this.braces++;
+      this.at++;
+      return true;
+    }
+    if (line[at] === "}" && this.braces) {
+      this.braces--;
+      this.at++;
+      return true;
+    }
+    if (this.braces) return this.next();
     if (line[at] === ">") {
       this.inTag = false;
       return false;
     }
     if (line.startsWith("/>", at)) {
       this.inTag = false;
+      this.braces = 0;
       this.at += 2;
       return true;
     }
@@ -314,7 +340,8 @@ class Lexer {
   next() {
     const { line, at, spec } = this;
     const char = line[at];
-    if (spec.line && line.startsWith(spec.line, at) && !(spec.line === "//" && line[at - 1] === ":")) {
+    const wordStart = at === 0 || /[\s;|&()]/.test(line[at - 1]);
+    if (spec.line && line.startsWith(spec.line, at) && !(spec.line === "//" && line[at - 1] === ":") && (!spec.wordComment || wordStart)) {
       this.emit(line.length, "comment");
       return true;
     }
@@ -327,6 +354,13 @@ class Lexer {
         this.emit(line.length, "comment");
       } else this.emit(end + comment[1].length, "comment");
       return true;
+    }
+    if (spec.regex && char === "/") {
+      const end = this.regexEnd();
+      if (end > 0) {
+        this.emit(end, "string");
+        return true;
+      }
     }
     if (spec.triple && (line.startsWith('"""', at) || line.startsWith("'''", at))) return this.multiline(line.slice(at, at + 3));
     if (char === '"' || (char === "'" && !spec.charQuotes)) return this.quoted(char);
@@ -374,6 +408,32 @@ class Lexer {
     return true;
   }
 
+  // Where a regex literal starting at the cursor ends, or -1 when this `/` divides. A regex
+  // can start where a value can: after an operator, an opening bracket, or a word like return.
+  regexEnd() {
+    const { line, at } = this;
+    let p = at - 1;
+    while (p >= 0 && /\s/.test(line[p])) p--;
+    if (p >= 0 && !/[(,=:[!&|?{};+\-*%>~^]/.test(line[p])) {
+      const word = /[\w$]+$/.exec(line.slice(0, p + 1))?.[0];
+      if (!REGEX_AFTER.has(word)) return -1;
+    }
+    let inClass = false;
+    for (let i = at + 1; i < line.length; i++) {
+      const c = line[i];
+      if (c === "\\") i++;
+      else if (c === "[") inClass = true;
+      else if (c === "]") inClass = false;
+      else if (c === "/" && !inClass) {
+        if (i === at + 1) return -1;
+        let end = i + 1;
+        while (/[a-z]/i.test(line[end] ?? "")) end++;
+        return end;
+      }
+    }
+    return -1;
+  }
+
   // A string that must close on this line; an unclosed quote is an apostrophe, left plain.
   quoted(quote) {
     const end = closes(this.line, this.at + 1, quote);
@@ -385,9 +445,10 @@ class Lexer {
 
   // A string that may run over lines: a template, a raw Go string, a Python docstring.
   multiline(quote) {
-    const end = closes(this.line, this.at + quote.length, quote);
+    const raw = Boolean(this.spec.rawTemplate && quote === "`");
+    const end = closes(this.line, this.at + quote.length, quote, raw);
     if (end < 0) {
-      this.open = { kind: "string", until: quote };
+      this.open = { kind: "string", until: quote, raw };
       this.emit(this.line.length, "string");
     } else this.emit(end, "string");
     return true;
